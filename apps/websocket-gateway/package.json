@@ -1,0 +1,28 @@
+{
+  "name": "@realtime-chat/websocket-gateway",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@realtime-chat/shared-types": "*",
+    "@realtime-chat/shared-utils": "*",
+    "@realtime-chat/shared-events": "*",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.0",
+    "helmet": "^7.1.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.5.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}

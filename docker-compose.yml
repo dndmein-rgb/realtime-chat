@@ -1,0 +1,105 @@
+name: realtime-chat
+
+services:
+  postgres:
+    image: postgres:15                    # same image you already have
+    container_name: realtime-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: realtime
+      POSTGRES_PASSWORD: realtimepass
+      POSTGRES_DB: realtime
+    ports:
+      - "5434:5432"                       # different host port (IRCTC uses 5433)
+    volumes:
+      - realtime_postgres_data:/var/lib/postgresql/data
+    networks:
+      - realtime-net
+
+  pgadmin:
+    image: dpage/pgadmin4
+    container_name: realtime-pgadmin
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@admin.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - "8082:80"                         # different port (IRCTC uses 8081)
+    depends_on:
+      - postgres
+    networks:
+      - realtime-net
+
+  redis:
+    image: redis/redis-stack:6.2.6-v19    # same image
+    container_name: realtime-redis
+    restart: unless-stopped
+    environment:
+      REDIS_ARGS: "--requirepass realtimepass"
+    ports:
+      - "6380:6379"                       # different host port
+    volumes:
+      - realtime_redis_data:/data
+    networks:
+      - realtime-net
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: realtime-zookeeper
+    restart: unless-stopped
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2182:2181"                       # different host port
+    volumes:
+      - realtime_zookeeper_data:/var/lib/zookeeper/data
+    networks:
+      - realtime-net
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: realtime-kafka
+    restart: unless-stopped
+    depends_on:
+      - zookeeper
+    ports:
+      - "9094:9092"
+      - "9095:9093"                       # different host ports
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:9095
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    volumes:
+      - realtime_kafka_data:/var/lib/kafka/data
+    networks:
+      - realtime-net
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: realtime-kafka-ui
+    restart: unless-stopped
+    depends_on:
+      - kafka
+    ports:
+      - "8083:8080"                       # different port
+    environment:
+      KAFKA_CLUSTERS_0_NAME: realtime-cluster
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
+    networks:
+      - realtime-net
+
+volumes:
+  realtime_postgres_data:
+  realtime_redis_data:
+  realtime_zookeeper_data:
+  realtime_kafka_data:
+
+networks:
+  realtime-net:
+    driver: bridge

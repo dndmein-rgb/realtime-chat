@@ -1,0 +1,29 @@
+{
+  "name": "realtime-chat",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:user": "npm run dev -w @realtime-chat/user-service",
+    "dev:chat": "npm run dev -w @realtime-chat/chat-service",
+    "dev:gateway": "npm run dev -w @realtime-chat/websocket-gateway",
+    "dev:presence": "npm run dev -w @realtime-chat/presence-service",
+    "dev:notification": "npm run dev -w @realtime-chat/notification-service",
+    
+    "build:shared": "npm run build --workspaces --if-present --workspace=@realtime-chat/shared-types --workspace=@realtime-chat/shared-events --workspace=@realtime-chat/shared-utils",
+    "build:apps": "npm run build --workspaces --if-present --workspace=@realtime-chat/user-service --workspace=@realtime-chat/chat-service --workspace=@realtime-chat/websocket-gateway --workspace=@realtime-chat/presence-service --workspace=@realtime-chat/notification-service",
+    "build": "npm run build:shared && npm run build:apps",
+
+     "watch:shared-types": "npm run dev -w @realtime-chat/shared-types",
+     "watch:shared-events": "npm run dev -w @realtime-chat/shared-events",
+     "watch:shared-utils": "npm run dev -w @realtime-chat/shared-utils",
+     
+    "lint": "npm run lint --workspaces --if-present"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
