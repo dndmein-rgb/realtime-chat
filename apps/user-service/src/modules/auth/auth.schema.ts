@@ -6,4 +6,11 @@ export const registerUserSchema = z.object({
     firstName: z.string().min(1, "First name is required").max(50),
     lastName: z.string().min(1, "Last name is required").max(50),
 })
-export type RegisterUserInput=z.infer<typeof registerUserSchema>
+export type RegisterUserInput = z.infer<typeof registerUserSchema>
+
+export const loginUserSchema = z.object({
+  email: z.string().email("Invalid email").trim().toLowerCase(),
+  password: z.string().min(1, "Password is required").max(72, "Password too long"),
+});
+
+export type LoginUserInput = z.infer<typeof loginUserSchema>;

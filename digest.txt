@@ -1,0 +1,2220 @@
+Directory structure:
+└── realtime-chat/
+    ├── docker-compose.yml
+    ├── package.json
+    ├── tsconfig.base.json
+    ├── apps/
+    │   ├── chat-service/
+    │   │   ├── package.json
+    │   │   ├── tsconfig.json
+    │   │   ├── .env.example
+    │   │   └── src/
+    │   │       ├── index.ts
+    │   │       └── config/
+    │   │           └── index.ts
+    │   ├── notification-service/
+    │   │   ├── package.json
+    │   │   ├── tsconfig.json
+    │   │   ├── .env.example
+    │   │   └── src/
+    │   │       ├── index.ts
+    │   │       └── config/
+    │   │           └── index.ts
+    │   ├── presence-service/
+    │   │   ├── package.json
+    │   │   ├── tsconfig.json
+    │   │   ├── .env.example
+    │   │   └── src/
+    │   │       ├── index.ts
+    │   │       └── config/
+    │   │           └── index.ts
+    │   ├── user-service/
+    │   │   ├── package.json
+    │   │   ├── prisma7.config.ts
+    │   │   ├── skills-lock.json
+    │   │   ├── tsconfig.json
+    │   │   ├── .env.example
+    │   │   ├── prisma/
+    │   │   │   ├── schema.prisma
+    │   │   │   └── migrations/
+    │   │   │       ├── migration_lock.toml
+    │   │   │       └── 20260928103604_init/
+    │   │   │           └── migration.sql
+    │   │   └── src/
+    │   │       ├── app.ts
+    │   │       ├── server.ts
+    │   │       ├── config/
+    │   │       │   ├── index.ts
+    │   │       │   └── logger.ts
+    │   │       ├── infrastructure/
+    │   │       │   ├── prisma.ts
+    │   │       │   ├── crypto/
+    │   │       │   │   └── token-hash.ts
+    │   │       │   └── redis/
+    │   │       │       ├── redis.client.ts
+    │   │       │       └── refresh-token.store.ts
+    │   │       ├── middlewares/
+    │   │       │   ├── auth.middleware.ts
+    │   │       │   ├── cors.middleware.ts
+    │   │       │   ├── error.middleware.ts
+    │   │       │   ├── req.middleware.ts
+    │   │       │   └── validate.middleware.ts
+    │   │       ├── modules/
+    │   │       │   └── auth/
+    │   │       │       ├── auth.container.ts
+    │   │       │       ├── auth.controller.ts
+    │   │       │       ├── auth.interface.ts
+    │   │       │       ├── auth.repository.ts
+    │   │       │       ├── auth.route.ts
+    │   │       │       ├── auth.schema.ts
+    │   │       │       ├── auth.service.ts
+    │   │       │       ├── auth.token.utils.ts
+    │   │       │       ├── auth.types.ts
+    │   │       │       └── auth.utils.ts
+    │   │       └── types/
+    │   │           └── express.d.ts
+    │   └── websocket-gateway/
+    │       ├── package.json
+    │       ├── tsconfig.json
+    │       ├── .env.example
+    │       └── src/
+    │           ├── index.ts
+    │           └── config/
+    │               └── index.ts
+    └── packages/
+        ├── shared-events/
+        │   ├── package.json
+        │   ├── tsconfig.json
+        │   └── src/
+        │       ├── index.ts
+        │       └── events/
+        │           ├── chat.ts
+        │           └── presence.ts
+        ├── shared-types/
+        │   ├── package.json
+        │   ├── tsconfig.json
+        │   └── src/
+        │       └── index.ts
+        └── shared-utils/
+            ├── package.json
+            ├── tsconfig.json
+            └── src/
+                ├── asyncHandler.ts
+                ├── errors.ts
+                └── index.ts
+
+================================================
+FILE: docker-compose.yml
+================================================
+name: realtime-chat
+
+services:
+  postgres:
+    image: postgres:15                    # same image you already have
+    container_name: realtime-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: realtime
+      POSTGRES_PASSWORD: realtimepass
+      POSTGRES_DB: realtime
+    ports:
+      - "5434:5432"                       # different host port (IRCTC uses 5433)
+    volumes:
+      - realtime_postgres_data:/var/lib/postgresql/data
+    networks:
+      - realtime-net
+
+  pgadmin:
+    image: dpage/pgadmin4
+    container_name: realtime-pgadmin
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@admin.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - "8082:80"                         # different port (IRCTC uses 8081)
+    depends_on:
+      - postgres
+    networks:
+      - realtime-net
+
+  redis:
+    image: redis/redis-stack:6.2.6-v19    # same image
+    container_name: realtime-redis
+    restart: unless-stopped
+    environment:
+      REDIS_ARGS: "--requirepass realtimepass"
+    ports:
+      - "6380:6379"                       # different host port
+      - "8001:8001"
+    volumes:
+      - realtime_redis_data:/data
+    networks:
+      - realtime-net
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: realtime-zookeeper
+    restart: unless-stopped
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2182:2181"                       # different host port
+    volumes:
+      - realtime_zookeeper_data:/var/lib/zookeeper/data
+    networks:
+      - realtime-net
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: realtime-kafka
+    restart: unless-stopped
+    depends_on:
+      - zookeeper
+    ports:
+      - "9095:9092"
+      - "9095:9093"                       # different host ports
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:9095
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    volumes:
+      - realtime_kafka_data:/var/lib/kafka/data
+    networks:
+      - realtime-net
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: realtime-kafka-ui
+    restart: unless-stopped
+    depends_on:
+      - kafka
+    ports:
+      - "8083:8080"                       # different port
+    environment:
+      KAFKA_CLUSTERS_0_NAME: realtime-cluster
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
+    networks:
+      - realtime-net
+
+volumes:
+  realtime_postgres_data:
+  realtime_redis_data:
+  realtime_zookeeper_data:
+  realtime_kafka_data:
+
+networks:
+  realtime-net:
+    driver: bridge
+
+
+================================================
+FILE: package.json
+================================================
+{
+  "name": "realtime-chat",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:user": "npm run dev -w @realtime-chat/user-service",
+    "dev:chat": "npm run dev -w @realtime-chat/chat-service",
+    "dev:gateway": "npm run dev -w @realtime-chat/websocket-gateway",
+    "dev:presence": "npm run dev -w @realtime-chat/presence-service",
+    "dev:notification": "npm run dev -w @realtime-chat/notification-service",
+    
+    "build:shared": "npm run build --workspaces --if-present --workspace=@realtime-chat/shared-types --workspace=@realtime-chat/shared-events --workspace=@realtime-chat/shared-utils",
+    "build:apps": "npm run build --workspaces --if-present --workspace=@realtime-chat/user-service --workspace=@realtime-chat/chat-service --workspace=@realtime-chat/websocket-gateway --workspace=@realtime-chat/presence-service --workspace=@realtime-chat/notification-service",
+    "build": "npm run build:shared && npm run build:apps",
+
+     "watch:shared-types": "npm run dev -w @realtime-chat/shared-types",
+     "watch:shared-events": "npm run dev -w @realtime-chat/shared-events",
+     "watch:shared-utils": "npm run dev -w @realtime-chat/shared-utils",
+     
+    "lint": "npm run lint --workspaces --if-present"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
+
+
+================================================
+FILE: tsconfig.base.json
+================================================
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2022"],
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUncheckedIndexedAccess": true
+  }
+}
+
+
+================================================
+FILE: apps/chat-service/package.json
+================================================
+{
+  "name": "@realtime-chat/chat-service",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@realtime-chat/shared-types": "*",
+    "@realtime-chat/shared-utils": "*",
+    "@realtime-chat/shared-events": "*",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.0",
+    "helmet": "^7.1.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.5.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}
+
+
+================================================
+FILE: apps/chat-service/tsconfig.json
+================================================
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "types":["node"]
+  },
+  "include": ["src/**/*"]
+}
+
+
+================================================
+FILE: apps/chat-service/.env.example
+================================================
+NODE_ENV=development
+PORT=4002
+DATABASE_URL=postgresql://realtime:realtimepass@localhost:5434/realtime
+KAFKA_BROKER=localhost:9095
+
+
+================================================
+FILE: apps/chat-service/src/index.ts
+================================================
+import express from "express";
+import helmet from "helmet";
+import cors from "cors";
+import { config } from "./config/index.js";
+import type { Request,Response } from "express";
+
+const app = express();
+
+app.use(helmet());
+app.use(cors());
+app.use(express.json());
+
+app.get("/health", (_req:Request, res:Response) => {
+  res.status(200).json({
+    success: true,
+    service: config.SERVICE_NAME,
+    timestamp: new Date().toISOString(),
+  });
+});
+
+app.listen(config.PORT, () => {
+  console.log(`ðŸš€ ${config.SERVICE_NAME} running on port ${config.PORT}`);
+});
+
+
+
+================================================
+FILE: apps/chat-service/src/config/index.ts
+================================================
+import { z } from "zod";
+import "dotenv/config";
+
+const envSchema = z.object({
+  NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
+  PORT: z.coerce.number().default(4002),
+  DATABASE_URL: z.string().min(1),
+  KAFKA_BROKER: z.string().min(1),
+});
+
+const parsed = envSchema.safeParse(process.env);
+
+if (!parsed.success) {
+  console.error("❌ Invalid environment variables:", parsed.error.flatten().fieldErrors);
+  process.exit(1);
+}
+
+export const config = {
+  ...parsed.data,
+  SERVICE_NAME: "chat-service",
+} as const;
+
+
+================================================
+FILE: apps/notification-service/package.json
+================================================
+{
+  "name": "@realtime-chat/notification-service",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@realtime-chat/shared-types": "*",
+    "@realtime-chat/shared-utils": "*",
+    "@realtime-chat/shared-events": "*",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.0",
+    "helmet": "^7.1.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.5.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}
+
+
+================================================
+FILE: apps/notification-service/tsconfig.json
+================================================
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "types":["node"]
+  },
+  "include": ["src/**/*"]
+}
+
+
+================================================
+FILE: apps/notification-service/.env.example
+================================================
+NODE_ENV=development
+PORT=4005
+KAFKA_BROKER=localhost:9095
+
+
+================================================
+FILE: apps/notification-service/src/index.ts
+================================================
+import express from "express";
+import helmet from "helmet";
+import cors from "cors";
+import type { Request, Response } from "express";
+import { config } from "./config/index.js";
+
+const app = express();
+
+app.use(helmet());
+app.use(cors());
+app.use(express.json());
+
+app.get("/health", (_req: Request, res: Response) => {
+  res.status(200).json({
+    success: true,
+    service: config.SERVICE_NAME,
+    timestamp: new Date().toISOString(),
+  });
+});
+
+app.listen(config.PORT, () => {
+  console.log(`ðŸš€ ${config.SERVICE_NAME} running on port ${config.PORT}`);
+});
+
+
+================================================
+FILE: apps/notification-service/src/config/index.ts
+================================================
+import { z } from "zod";
+import "dotenv/config";
+
+const envSchema = z.object({
+  NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
+  PORT: z.coerce.number().default(4005),
+  KAFKA_BROKER: z.string().min(1),
+});
+
+const parsed = envSchema.safeParse(process.env);
+
+if (!parsed.success) {
+  console.error("❌ Invalid environment variables:", parsed.error.flatten().fieldErrors);
+  process.exit(1);
+}
+
+export const config = {
+  ...parsed.data,
+  SERVICE_NAME: "notification-service",
+} as const;
+
+
+================================================
+FILE: apps/presence-service/package.json
+================================================
+{
+  "name": "@realtime-chat/presence-service",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@realtime-chat/shared-types": "*",
+    "@realtime-chat/shared-utils": "*",
+    "@realtime-chat/shared-events": "*",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.0",
+    "helmet": "^7.1.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.5.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}
+
+
+================================================
+FILE: apps/presence-service/tsconfig.json
+================================================
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "types":["node"]
+  },
+  "include": ["src/**/*"]
+}
+
+
+================================================
+FILE: apps/presence-service/.env.example
+================================================
+NODE_ENV=development
+PORT=4004
+KAFKA_BROKER=localhost:9095
+REDIS_URL=redis://:realtimepass@localhost:6380
+
+
+================================================
+FILE: apps/presence-service/src/index.ts
+================================================
+import express from "express";
+import helmet from "helmet";
+import cors from "cors";
+import type { Request, Response } from "express";
+import { config } from "./config/index.js";
+
+const app = express();
+
+app.use(helmet());
+app.use(cors());
+app.use(express.json());
+
+app.get("/health", (_req: Request, res: Response) => {
+  res.status(200).json({
+    success: true,
+    service: config.SERVICE_NAME,
+    timestamp: new Date().toISOString(),
+  });
+});
+
+app.listen(config.PORT, () => {
+  console.log(`ðŸš€ ${config.SERVICE_NAME} running on port ${config.PORT}`);
+});
+
+
+================================================
+FILE: apps/presence-service/src/config/index.ts
+================================================
+import { z } from "zod";
+import "dotenv/config";
+
+const envSchema = z.object({
+  NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
+  PORT: z.coerce.number().default(4004),
+  KAFKA_BROKER: z.string().min(1),
+  REDIS_URL: z.string().min(1),
+});
+
+const parsed = envSchema.safeParse(process.env);
+
+if (!parsed.success) {
+  console.error("❌ Invalid environment variables:", parsed.error.flatten().fieldErrors);
+  process.exit(1);
+}
+
+export const config = {
+  ...parsed.data,
+  SERVICE_NAME: "presence-service",
+} as const;
+
+
+================================================
+FILE: apps/user-service/package.json
+================================================
+{
+  "name": "@realtime-chat/user-service",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "lint": "eslint src --ext .ts",
+    "db:migrate": "npx prisma migrate dev --name init",
+    "db:generate": "npx prisma generate"
+  },
+  "dependencies": {
+    "@prisma/adapter-pg": "^7.10.0",
+    "@prisma/client": "^7.10.0",
+    "@realtime-chat/shared-types": "*",
+    "@realtime-chat/shared-utils": "*",
+    "bcrypt": "^6.0.0",
+    "cookie-parser": "^1.4.7",
+    "cors": "^2.8.5",
+    "dotenv": "^16.6.1",
+    "express": "^4.21.0",
+    "helmet": "^7.1.0",
+    "ioredis": "^6.0.0",
+    "jsonwebtoken": "^9.0.3",
+    "pg": "^8.23.0",
+    "pino": "^10.3.1",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/bcrypt": "^6.0.0",
+    "@types/cookie-parser": "^1.4.10",
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/jsonwebtoken": "^9.0.10",
+    "@types/node": "^22.5.0",
+    "pino-pretty": "^13.1.3",
+    "prisma": "^7.10.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}
+
+
+
+================================================
+FILE: apps/user-service/prisma7.config.ts
+================================================
+// This file was generated by Prisma, and assumes you have installed the following:
+// npm install --save-dev prisma dotenv
+import "dotenv/config";
+import { defineConfig } from "prisma/config";
+
+export default defineConfig({
+  schema: "prisma/schema.prisma",
+  migrations: {
+    path: "prisma/migrations",
+  },
+  datasource: {
+    url: process.env["DATABASE_URL"],
+  },
+});
+
+
+
+================================================
+FILE: apps/user-service/skills-lock.json
+================================================
+{
+  "version": 1,
+  "skills": {
+    "prisma-cli": {
+      "source": "prisma/skills",
+      "sourceType": "github",
+      "skillPath": "prisma-cli/SKILL.md",
+      "computedHash": "b92e55aef78f6796d81433c44738a6733211a04c16e65cbad6d42c5f71092aab"
+    },
+    "prisma-client-api": {
+      "source": "prisma/skills",
+      "sourceType": "github",
+      "skillPath": "prisma-client-api/SKILL.md",
+      "computedHash": "5dcc0793337151efa73a444e5adbc7e1c24180778e83b4fe94c9109c391bd333"
+    },
+    "prisma-compute": {
+      "source": "prisma/skills",
+      "sourceType": "github",
+      "skillPath": "prisma-compute/SKILL.md",
+      "computedHash": "e5695a3c6f35428e96df30ae662716bd4c9d9074f72cc9334b3050445a1bd4e2"
+    },
+    "prisma-database-setup": {
+      "source": "prisma/skills",
+      "sourceType": "github",
+      "skillPath": "prisma-database-setup/SKILL.md",
+      "computedHash": "0911d9454bd48df3badd23a50fd90a280eabb15dcbd472c14e7b729075dadefb"
+    },
+    "prisma-driver-adapter-implementation": {
+      "source": "prisma/skills",
+      "sourceType": "github",
+      "skillPath": "prisma-driver-adapter-implementation/SKILL.md",
+      "computedHash": "07484627aea6cce4d0f94b4090ff9acc0caa7e104f9988b95abecf80132f4103"
+    },
+    "prisma-mongodb-upgrade": {
+      "source": "prisma/skills",
+      "sourceType": "github",
+      "skillPath": "prisma-mongodb-upgrade/SKILL.md",
+      "computedHash": "f9ba440e88ca4cec9801d04762296e29e99ca08cb8a8156e4f783ecf90279c8f"
+    },
+    "prisma-postgres": {
+      "source": "prisma/skills",
+      "sourceType": "github",
+      "skillPath": "prisma-postgres/SKILL.md",
+      "computedHash": "d669fbd0d8017d16c967f18b20e1c1345cd4a2a0076d762459bfef79f551f655"
+    },
+    "prisma-postgres-setup": {
+      "source": "prisma/skills",
+      "sourceType": "github",
+      "skillPath": "prisma-postgres-setup/SKILL.md",
+      "computedHash": "c89d3aa91285d8e4964fcaa5238c99a3d3c20b617e032e731cf632330a85a5a6"
+    },
+    "prisma-upgrade-v7": {
+      "source": "prisma/skills",
+      "sourceType": "github",
+      "skillPath": "prisma-upgrade-v7/SKILL.md",
+      "computedHash": "dcc6c71adca6b22f37c5bda5ac7fd63c3bb59495596a22e06a29c7c85371558f"
+    }
+  }
+}
+
+
+
+================================================
+FILE: apps/user-service/tsconfig.json
+================================================
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "types":["node"]
+  },
+  "include": ["src/**/*"]
+}
+
+
+================================================
+FILE: apps/user-service/.env.example
+================================================
+NODE_ENV=development
+PORT=4001
+DATABASE_URL=postgresql://realtime:realtimepass@localhost:5434/realtime
+JWT_ACCESS_SECRET=change_me_to_a_long_random_string_at_least_32_chars
+JWT_REFRESH_SECRET=change_me_to_another_long_random_string_at_least_32_chars
+ACCESS_TOKEN_EXP=15m
+REFRESH_TOKEN_EXP=7d
+REFRESH_TOKEN_TTL_SECONDS=604800
+REDIS_URL=redis://:realtimepass@localhost:6380
+CLIENT_ORIGIN=http://localhost:3000
+
+
+================================================
+FILE: apps/user-service/prisma/schema.prisma
+================================================
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Get a free hosted Postgres database in seconds: `npx create-db`
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User{
+id     String  @id @default(uuid())
+email   String  @unique
+passwordHash String
+firstName    String
+lastName     String
+createdAt    DateTime @default(now())
+updatedAt    DateTime @updatedAt
+
+  @@map("users")
+}
+
+
+
+
+
+================================================
+FILE: apps/user-service/prisma/migrations/migration_lock.toml
+================================================
+# Please do not edit this file manually
+# It should be added in your version-control system (e.g., Git)
+provider = "postgresql"
+
+
+
+================================================
+FILE: apps/user-service/prisma/migrations/20260928103604_init/migration.sql
+================================================
+-- CreateTable
+CREATE TABLE "users" (
+    "id" TEXT NOT NULL,
+    "email" TEXT NOT NULL,
+    "passwordHash" TEXT NOT NULL,
+    "firstName" TEXT NOT NULL,
+    "lastName" TEXT NOT NULL,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
+
+    CONSTRAINT "users_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateIndex
+CREATE UNIQUE INDEX "users_email_key" ON "users"("email");
+
+
+
+================================================
+FILE: apps/user-service/src/app.ts
+================================================
+import express from "express";
+import cookieParser from "cookie-parser";
+import helmet from "helmet";
+
+import authRoutes from "./modules/auth/auth.route.js";
+
+
+import { corsMiddleware } from "./middlewares/cors.middleware.js";
+import { errorHandler } from "./middlewares/error.middleware.js";
+import { requestLogger } from "./middlewares/req.middleware.js";
+
+const app = express();
+
+app.use(corsMiddleware);
+
+app.use(
+  helmet({
+    crossOriginOpenerPolicy: false,
+    crossOriginEmbedderPolicy: false,
+  }),
+);
+
+app.use(requestLogger);
+app.use(express.json());
+app.use(cookieParser());
+
+app.use("/auth", authRoutes);
+
+
+app.get("/", (_req, res) => {
+  res.send("Hello from user-service");
+});
+
+app.get("/health", (_req, res) => {
+  res.status(200).json({
+    message: "ok",
+  });
+});
+
+app.use(errorHandler);
+
+export default app;
+
+
+================================================
+FILE: apps/user-service/src/server.ts
+================================================
+import "dotenv/config";
+
+import type { Server } from "node:http";
+
+import { logger } from "./config/logger.js";
+import { redis } from "./infrastructure/redis/redis.client.js";
+import { prisma } from "./infrastructure/prisma.js";
+import { config } from "./config/index.js";
+
+import app from "./app.js";
+
+
+let server: Server | undefined;
+let isShuttingDown = false;
+
+const shutdown = async (signal: string): Promise<void> => {
+  if (isShuttingDown) {
+    logger.warn(`Shutdown already in progress; received ${signal} again`);
+    return;
+  }
+
+  isShuttingDown = true;
+  logger.info(`Received ${signal}. Starting graceful shutdown...`);
+
+  try {
+    if (server) {
+      await new Promise<void>((resolve, reject) => {
+        server!.close((error) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+
+          resolve();
+        });
+      });
+
+      logger.info("HTTP server closed");
+    }
+
+    await redis.quit();
+    logger.info("Redis connection closed");
+
+    await prisma.$disconnect();
+    logger.info("Prisma connection closed");
+
+    logger.info("Graceful shutdown completed");
+  } catch (error) {
+    logger.error("Error during graceful shutdown", error);
+    process.exitCode = 1;
+  }
+};
+
+const startServer = async (): Promise<void> => {
+  try {
+    const httpServer = app.listen(config.PORT, () => {
+      logger.info(
+        `${config.SERVICE_NAME} is running on http://localhost:${config.PORT}`,
+      );
+    });
+
+    server = httpServer;
+
+    httpServer.on("error", (error) => {
+      logger.error("HTTP server error", error);
+      process.exitCode = 1;
+    });
+
+    process.on("SIGTERM", () => {
+      void shutdown("SIGTERM");
+    });
+
+    process.on("SIGINT", () => {
+      void shutdown("SIGINT");
+    });
+  } catch (error) {
+    logger.error("Failed to start server", error);
+    process.exitCode = 1;
+  }
+};
+void startServer();
+
+
+
+================================================
+FILE: apps/user-service/src/config/index.ts
+================================================
+import { z } from "zod";
+import "dotenv/config"
+
+const envSchema = z.object({
+  NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
+    PORT: z.coerce.number().default(4001),
+      DATABASE_URL: z.string().min(1),
+      JWT_ACCESS_SECRET: z.string().min(32),
+      JWT_REFRESH_SECRET: z.string().min(32),
+      ACCESS_TOKEN_EXP: z.string().default("15m"),
+      REFRESH_TOKEN_EXP: z.string().default("7d"),
+  REDIS_URL: z.string(),
+  REFRESH_TOKEN_TTL_SECONDS: z.coerce.number().int().positive().default(604800),
+  CLIENT_ORIGINS: z
+    .string()
+    .min(1)
+    .transform((value) =>
+      value.split(",").map((origin) => origin.trim()),
+    ),
+})
+
+const parsed = envSchema.safeParse(process.env);
+
+if (!parsed.success) {
+  console.error("❌ Invalid environment variables:", parsed.error.flatten().fieldErrors);
+  process.exit(1);
+}
+
+export const config = {
+  ...parsed.data,
+  SERVICE_NAME: "user-service",
+} as const;
+
+
+
+================================================
+FILE: apps/user-service/src/config/logger.ts
+================================================
+import pino from "pino";
+import { config } from "./index.js";
+
+export const logger = pino({
+  level: config.NODE_ENV === "development" ? "debug" : "info",
+
+  ...(config.NODE_ENV === "development" && {
+    transport: {
+      target: "pino-pretty",
+      options: {
+        colorize: true,
+        translateTime: "SYS:standard",
+        ignore: "pid,hostname",
+      },
+    },
+  }),
+
+  base: {
+    service: config.SERVICE_NAME,
+  },
+});
+
+
+================================================
+FILE: apps/user-service/src/infrastructure/prisma.ts
+================================================
+import { PrismaPg } from "@prisma/adapter-pg";
+import { PrismaClient } from "../generated/prisma/client.js";
+import { config } from "../config/index.js";
+
+const globalForPrisma = globalThis as unknown as {
+  prisma: PrismaClient | undefined;
+};
+
+const adapter = new PrismaPg({
+  connectionString: config.DATABASE_URL,
+});
+
+export const prisma =
+  globalForPrisma.prisma ??
+  new PrismaClient({
+    adapter,
+    log:
+      process.env.NODE_ENV === "development"
+        ? ["error", "warn"]
+        : ["error"],
+  });
+
+if (process.env.NODE_ENV !== "production") {
+  globalForPrisma.prisma = prisma;
+}
+
+
+================================================
+FILE: apps/user-service/src/infrastructure/crypto/token-hash.ts
+================================================
+import { createHash } from "node:crypto";
+
+export const hashToken = (token: string): string => {
+  return createHash("sha256")
+    .update(token)
+    .digest("hex");
+};
+
+
+================================================
+FILE: apps/user-service/src/infrastructure/redis/redis.client.ts
+================================================
+import {Redis} from "ioredis";
+import { config } from "../../config/index.js";
+
+
+
+export const redis = new Redis(config.REDIS_URL, {
+  maxRetriesPerRequest: 3,
+});
+
+redis.on("error", (error) => {
+  console.error("Redis connection error:", error);
+});
+
+
+================================================
+FILE: apps/user-service/src/infrastructure/redis/refresh-token.store.ts
+================================================
+import { redis } from "./redis.client.js";
+import { hashToken } from "../crypto/token-hash.js";
+
+const ROTATE_REFRESH_TOKEN_SCRIPT = `
+  local storedHash = redis.call("GET", KEYS[1])
+
+  if not storedHash then
+    return 0
+  end
+
+  if storedHash ~= ARGV[1] then
+    return 0
+  end
+
+  redis.call("DEL", KEYS[1])
+
+  redis.call(
+    "SET",
+    KEYS[2],
+    ARGV[2],
+    "EX",
+    ARGV[3]
+  )
+
+  return 1
+`;
+
+const REVOKE_REFRESH_TOKEN_SCRIPT = `
+  local storedHash = redis.call("GET", KEYS[1])
+
+  if not storedHash then
+    return 0
+  end
+
+  if storedHash ~= ARGV[1] then
+    return 0
+  end
+
+  return redis.call("DEL", KEYS[1])
+`;
+
+export class RefreshTokenStore {
+  async save(
+    jti: string,
+    refreshToken: string,
+    ttlSeconds: number,
+  ) {
+    await redis.set(
+      this.getKey(jti),
+      hashToken(refreshToken),
+      "EX",
+      ttlSeconds,
+    );
+  }
+
+  async rotate(
+    oldJti: string,
+    oldRefreshToken: string,
+    newJti: string,
+    newRefreshToken: string,
+    ttlSeconds: number,
+  ): Promise<boolean> {
+    const result = await redis.eval(
+      ROTATE_REFRESH_TOKEN_SCRIPT,
+      2,
+      this.getKey(oldJti),
+      this.getKey(newJti),
+      hashToken(oldRefreshToken),
+      hashToken(newRefreshToken),
+      String(ttlSeconds),
+    );
+
+    return result === 1;
+  }
+
+  async revoke(
+    jti: string,
+    refreshToken: string,
+  ): Promise<boolean> {
+    const result = await redis.eval(
+      REVOKE_REFRESH_TOKEN_SCRIPT,
+      1,
+      this.getKey(jti),
+      hashToken(refreshToken),
+    );
+
+    return result === 1;
+  }
+
+  private getKey(jti: string) {
+    return `refresh:${jti}`;
+  }
+}
+
+export const refreshTokenStore = new RefreshTokenStore();
+
+
+
+================================================
+FILE: apps/user-service/src/middlewares/auth.middleware.ts
+================================================
+import type {
+  NextFunction,
+  Request,
+  Response,
+} from "express";
+import jwt from "jsonwebtoken";
+
+import { UnauthorizedError } from "@realtime-chat/shared-utils";
+import { verifyAccessToken } from "../modules/auth/auth.token.utils.js";
+
+export const authenticate = (
+  req: Request,
+  _res: Response,
+  next: NextFunction,
+): void => {
+  try {
+    const authHeader = req.headers.authorization;
+
+    if (!authHeader) {
+      return next(
+        new UnauthorizedError("Authentication required"),
+      );
+    }
+
+    if (!authHeader.startsWith("Bearer ")) {
+      return next(
+        new UnauthorizedError(
+          "Invalid authentication header format",
+        ),
+      );
+    }
+
+    const accessToken = authHeader.split(" ")[1];
+
+    if (!accessToken) {
+      return next(
+        new UnauthorizedError("Access token missing"),
+      );
+    }
+
+    const userId = verifyAccessToken(accessToken);
+
+    req.user = {
+      userId,
+    };
+
+    return next();
+  } catch (error) {
+    if (error instanceof jwt.TokenExpiredError) {
+      return next(
+        new UnauthorizedError("Access token expired"),
+      );
+    }
+
+    if (error instanceof jwt.JsonWebTokenError) {
+      return next(
+        new UnauthorizedError("Invalid access token"),
+      );
+    }
+
+    return next(error);
+  }
+};
+
+
+================================================
+FILE: apps/user-service/src/middlewares/cors.middleware.ts
+================================================
+import cors from "cors";
+import { config } from "../config/index.js";
+
+const allowedOrigins = config.CLIENT_ORIGINS
+
+
+export const corsMiddleware = cors({
+  origin: (origin, callback) => {
+    // Requests without an Origin header include curl, Postman,
+    // and server-to-server requests.
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+      return;
+    }
+
+    callback(new Error("Origin not allowed by CORS"));
+  },
+
+  credentials: true,
+
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+
+  allowedHeaders: ["Content-Type", "Authorization"],
+
+  optionsSuccessStatus: 204,
+});
+
+
+================================================
+FILE: apps/user-service/src/middlewares/error.middleware.ts
+================================================
+import { AppError } from "@realtime-chat/shared-utils";
+import type{Request,Response, NextFunction } from "express";
+import { config } from "../config/index.js";
+import { logger } from "../config/logger.js";
+
+
+export const errorHandler = (err:Error,_req:Request,res:Response,_next:NextFunction): void => {
+  if (err instanceof AppError) {
+    res.status(err.statusCode).json({
+          success: false,
+          error: err.code,
+          message: err.message,
+        });
+        return;
+  }
+  logger.error("Unhandled error", {
+    message: err.message,
+    stack: err.stack,
+  });
+
+  res.status(500).json({
+      success: false,
+      error: "INTERNAL_SERVER_ERROR",
+      message:
+        config.NODE_ENV === "development"
+          ? err.message
+          : "Internal Server Error",
+    });
+}
+
+
+================================================
+FILE: apps/user-service/src/middlewares/req.middleware.ts
+================================================
+import { RequestHandler } from "express";
+import { logger } from "../config/logger.js";
+
+export const requestLogger: RequestHandler=(req,res,next)=> {
+  const start = process.hrtime.bigint();
+  
+    res.on("finish", () => {
+      const durationMs =
+        Number(process.hrtime.bigint() - start) / 1_000_000;
+  
+      logger.info(
+        `${req.method} ${req.originalUrl} ${res.statusCode} - ${durationMs.toFixed(2)} ms`,
+      );
+    });
+  
+    next();
+}
+
+
+================================================
+FILE: apps/user-service/src/middlewares/validate.middleware.ts
+================================================
+import { BadRequestError } from "@realtime-chat/shared-utils";
+import type{Request,Response, NextFunction } from "express";
+import type{ ZodSchema } from "zod";
+
+export const validate = (schema: ZodSchema) => (req: Request, _res: Response, next: NextFunction):void => {
+  const result = schema.safeParse(req.body);
+  if (!result.success) {
+        const message = result.error.errors
+          .map((e) => e.message)
+          .join(", ");
+        return next(new BadRequestError(message));
+  }
+
+  req.body = result.data;
+      next();
+}
+
+
+================================================
+FILE: apps/user-service/src/modules/auth/auth.container.ts
+================================================
+import { AuthRepository } from "./auth.repository.js";
+import { AuthService } from "./auth.service.js";
+
+
+const authRepository = new AuthRepository()
+
+export const authService=new AuthService(authRepository)
+
+
+
+================================================
+FILE: apps/user-service/src/modules/auth/auth.controller.ts
+================================================
+import type { Request, Response } from "express";
+import { asyncHandler, UnauthorizedError } from "@realtime-chat/shared-utils";
+import { authService } from "./auth.container.js";
+import { config } from "../../config/index.js";
+
+export const register = asyncHandler(async (req: Request, res: Response) => {
+  const user = await authService.register(req.body);
+
+  res.status(201).json({
+    success: true,
+    message: "User registered successfully",
+    data: user,
+  });
+})
+
+const refreshCookieOptions = {
+  httpOnly: true,
+  secure: config.NODE_ENV === "production",
+  sameSite: "lax" as const,
+  path: "/auth",
+  maxAge: config.REFRESH_TOKEN_TTL_SECONDS * 1000,
+};
+export const login = asyncHandler(async (req: Request, res: Response) => {
+  const result = await authService.login(req.body);
+ res.cookie("refreshToken", result.refreshToken, refreshCookieOptions);
+  res.status(200).json({
+    success: true,
+    message: "Login successful",
+    data: {
+          user: result.user,
+          accessToken: result.accessToken,
+        },
+  });
+});
+
+
+export const refresh = asyncHandler(async (req:Request,res:Response) => {
+  const refreshToken = req.cookies?.refreshToken;
+ 
+   if (!refreshToken) {
+     throw new UnauthorizedError("Refresh token is required");
+   }
+ 
+   const result = await authService.refresh(refreshToken);
+ 
+   res.cookie("refreshToken", result.refreshToken, refreshCookieOptions);
+ 
+   res.status(200).json({
+     success: true,
+     message: "Token refreshed",
+     data: {
+       accessToken: result.accessToken,
+     },
+   });
+});
+
+export const logout = asyncHandler(async (req, res) => {
+  const refreshToken = req.cookies?.refreshToken;
+
+  await authService.logout(refreshToken);
+
+  res.clearCookie(
+    "refreshToken",
+    refreshCookieOptions,
+  );
+
+  res.status(200).json({
+    success: true,
+    message: "Logged out successfully",
+  });
+});
+
+export const me = asyncHandler(
+  async (req: Request, res: Response) => {
+    if (!req.user) {
+      throw new UnauthorizedError(
+        "Authentication required",
+      );
+    }
+
+    const user = await authService.me(
+      req.user.userId,
+    );
+
+    res.status(200).json({
+      success: true,
+      message: "User fetched successfully",
+      data: user,
+    });
+  },
+);
+
+
+
+================================================
+FILE: apps/user-service/src/modules/auth/auth.interface.ts
+================================================
+import { CreateUserData, SafeUser } from "./auth.types.js";
+
+export interface AuthInterface{
+  create(data: CreateUserData): Promise<SafeUser>
+  findByEmail(email: string): Promise<(SafeUser & { passwordHash: string }) | null>;
+  findById(id: string): Promise<SafeUser | null>;
+  
+}
+
+
+================================================
+FILE: apps/user-service/src/modules/auth/auth.repository.ts
+================================================
+import { prisma } from "../../infrastructure/prisma.js";
+import { AuthInterface } from "./auth.interface.js";
+import { CreateUserData, SafeUser } from "./auth.types.js";
+
+
+export class AuthRepository implements AuthInterface{
+  async create(data: CreateUserData): Promise<SafeUser> {
+    return prisma.user.create({
+      data,
+      select: {
+              id: true,
+              email: true,
+              firstName: true,
+              lastName: true,
+              createdAt: true,
+            },
+    })
+  }
+  async findByEmail(email: string): Promise<(SafeUser & { passwordHash: string; }) | null> {
+    return await prisma.user.findUnique({
+      where: { email },
+      select: {
+              id: true,
+              email: true,
+              passwordHash: true,
+              firstName: true,
+              lastName: true,
+              createdAt: true,
+            },
+    })
+  }
+  async findById(id: string): Promise<SafeUser | null> {
+      return prisma.user.findUnique({
+        where: { id },
+        select: {
+          id: true,
+          email: true,
+          firstName: true,
+          lastName: true,
+          createdAt: true,
+        },
+      });
+    }
+}
+
+
+================================================
+FILE: apps/user-service/src/modules/auth/auth.route.ts
+================================================
+import express from "express";
+import { validate } from "../../middlewares/validate.middleware.js";
+import { loginUserSchema, registerUserSchema } from "./auth.schema.js";
+import { login, logout, me, refresh, register } from "./auth.controller.js";
+import { authenticate } from "../../middlewares/auth.middleware.js";
+
+
+const router = express.Router();
+
+router.post("/register", validate(registerUserSchema), register);
+router.post("/login", validate(loginUserSchema), login);
+router.post("/refresh", refresh);
+router.post("/logout", logout);
+router.get(
+  "/me",
+  authenticate,
+  me,
+);
+
+export default router;
+
+
+
+================================================
+FILE: apps/user-service/src/modules/auth/auth.schema.ts
+================================================
+import { z } from 'zod';
+
+export const registerUserSchema = z.object({
+  email: z.string().email("Invalid email").trim().toLowerCase(),
+  password:z.string().min(8,"Password must be atleast 8 characters long").max(72, "Password too long"),
+    firstName: z.string().min(1, "First name is required").max(50),
+    lastName: z.string().min(1, "Last name is required").max(50),
+})
+export type RegisterUserInput = z.infer<typeof registerUserSchema>
+
+export const loginUserSchema = z.object({
+  email: z.string().email("Invalid email").trim().toLowerCase(),
+  password: z.string().min(1, "Password is required").max(72, "Password too long"),
+});
+
+export type LoginUserInput = z.infer<typeof loginUserSchema>;
+
+
+
+================================================
+FILE: apps/user-service/src/modules/auth/auth.service.ts
+================================================
+import { ConflictError, UnauthorizedError } from "@realtime-chat/shared-utils";
+import { AuthInterface } from "./auth.interface.js";
+import { LoginUserInput, RegisterUserInput } from "./auth.schema.js";
+import { comparePassword, hashPassword } from "./auth.utils.js";
+import { logger } from "../../config/logger.js";
+import { generateAccessToken, generateRefreshToken, verifyRefreshToken } from "./auth.token.utils.js";
+import { config } from "../../config/index.js";
+import { refreshTokenStore } from "../../infrastructure/redis/refresh-token.store.js";
+
+
+export class AuthService{
+  constructor(private readonly authRepo: AuthInterface) { }
+
+  async register(data: RegisterUserInput) {
+    const {email,firstName,lastName,password } = data;
+    const existing = await this.authRepo.findByEmail(email);
+    if (existing) {
+          throw new ConflictError("Email already registered");
+    }
+    const passwordHash = await hashPassword(password);
+    const user = await this.authRepo.create({
+      email,
+      firstName,
+      lastName,
+      passwordHash
+
+    })
+    logger.info("User registered", { userId: user.id, email: user.email });
+    return user;
+  }
+
+  async login(data: LoginUserInput) {
+    const { email, password } = data;
+    const user = await this.authRepo.findByEmail(email)
+    if (!user) {
+        throw new UnauthorizedError("Invalid email or password");
+    }
+    const isPasswordValid = await comparePassword(password, user.passwordHash)
+    if (!isPasswordValid) {
+      throw new UnauthorizedError("Invalid email or password");
+    }
+
+    const accessToken = generateAccessToken(user.id);
+    const {token:refreshToken,jti} = generateRefreshToken(user.id);
+    await refreshTokenStore.save(jti,refreshToken,config.REFRESH_TOKEN_TTL_SECONDS)
+    const { passwordHash: _passwordHash, ...safeUser } = user
+    logger.info("User logged in", { userId: user.id });
+    return {
+       user: safeUser,
+       accessToken,
+       refreshToken,
+     };
+  }
+
+  async refresh(refreshToken: string) {
+    let payload: ReturnType<typeof verifyRefreshToken>;
+    try {
+      payload=verifyRefreshToken(refreshToken)
+    } catch {
+      throw new UnauthorizedError("Invalid or expired refresh token");
+    }
+
+      const {token:newRefreshToken,jti:newJti} = generateRefreshToken(payload.userId);
+
+    const rotated = await refreshTokenStore.rotate(payload.jti, refreshToken, newJti, newRefreshToken, config.REFRESH_TOKEN_TTL_SECONDS)
+    if (!rotated) {
+         throw new UnauthorizedError(
+           "Invalid or expired refresh token",
+         );
+       }
+       const accessToken = generateAccessToken(
+             payload.userId,
+           );
+
+       logger.info("Refresh token rotated", {
+             userId: payload.userId,
+             oldJti: payload.jti,
+             newJti,
+           });
+
+    return {
+       accessToken,
+       refreshToken: newRefreshToken,
+     };
+  }
+
+  async logout(refreshToken: string | undefined) {
+    if (!refreshToken) {
+      return;
+    }
+  
+    let payload: ReturnType<typeof verifyRefreshToken>;
+  
+    try {
+      payload = verifyRefreshToken(refreshToken);
+    } catch {
+      // Invalid/expired token needs nothing to revoke.
+      return;
+    }
+  
+    await refreshTokenStore.revoke(
+      payload.jti,
+      refreshToken,
+    );
+  
+    logger.info("User logged out", {
+      userId: payload.userId,
+    });
+  }
+
+  async me(userId: string) {
+    const user = await this.authRepo.findById(userId);
+    
+        if (!user) {
+          throw new UnauthorizedError("User no longer exists");
+        }
+    
+        return user;
+  }
+}
+
+
+
+================================================
+FILE: apps/user-service/src/modules/auth/auth.token.utils.ts
+================================================
+import jwt,{type SignOptions } from "jsonwebtoken";
+import { config } from "../../config/index.js";
+import {  randomUUID } from "node:crypto";
+
+type TokenPayload = {
+  userId:  string;
+  jti: string
+
+}
+
+const accessOptions: SignOptions = {
+  algorithm: "HS256",
+  expiresIn: config.ACCESS_TOKEN_EXP as SignOptions["expiresIn"],
+  issuer: "realtime-chat",
+  audience:"realtime-chat-api"
+}
+
+const refreshOptions: SignOptions = {
+  algorithm: "HS256",
+  expiresIn: config.REFRESH_TOKEN_EXP as SignOptions["expiresIn"],
+  issuer: "realtime-chat",
+  audience: "realtime-chat-api",
+};
+
+export const generateAccessToken=(userId:string):string=> {
+  return jwt.sign({userId},config.JWT_ACCESS_SECRET,{...accessOptions,subject:userId})
+  }
+
+export const generateRefreshToken = (
+  userId: string,
+  jti = randomUUID(),
+): { token: string; jti: string } => {
+  const token= jwt.sign(
+    { userId },
+    config.JWT_REFRESH_SECRET,
+    {
+      ...refreshOptions,
+      subject: userId,
+      jwtid: jti,
+    },
+  );
+  return {token,jti}
+};
+export const verifyAccessToken = (token:string):string => {
+  const payload = jwt.verify(token, config.JWT_ACCESS_SECRET, {
+      algorithms: ["HS256"],
+      issuer: "realtime-chat",
+      audience: "realtime-chat-api",
+    });
+  
+    if (
+      typeof payload === "string" ||
+      typeof payload.sub !== "string"
+    ) {
+      throw new Error("Invalid access token payload");
+    }
+  
+    return payload.sub;
+
+}
+
+export const verifyRefreshToken = (token: string): TokenPayload => {
+  const payload = jwt.verify(token, config.JWT_REFRESH_SECRET, {
+    algorithms: ["HS256"],
+    issuer: "realtime-chat",
+    audience: "realtime-chat-api",
+  });
+
+  if (
+    typeof payload === "string" ||
+    typeof payload.sub !== "string" ||
+    typeof payload.jti !== "string"
+  ) {
+    throw new Error("Invalid refresh token payload");
+  }
+
+  return {
+    userId: payload.sub,
+    jti: payload.jti,
+  };
+};
+
+
+
+
+================================================
+FILE: apps/user-service/src/modules/auth/auth.types.ts
+================================================
+export interface SafeUser{
+  id: string;
+  email: string;
+  firstName: string;
+    lastName: string;
+    createdAt: Date;
+}
+
+export interface CreateUserData {
+  email: string;
+  passwordHash: string;
+  firstName: string;
+  lastName: string;
+}
+
+
+
+================================================
+FILE: apps/user-service/src/modules/auth/auth.utils.ts
+================================================
+import bcrypt from 'bcrypt'
+
+const SALT_ROUNDS = 12
+
+export const hashPassword = async (plain: string): Promise<string> => {
+  return bcrypt.hash(plain, SALT_ROUNDS);
+};
+
+export const comparePassword = async (
+  plain: string,
+  hash: string
+): Promise<boolean> => {
+  return bcrypt.compare(plain, hash);
+};
+
+
+
+================================================
+FILE: apps/user-service/src/types/express.d.ts
+================================================
+declare global {
+  namespace Express {
+    interface Request {
+      user?: {
+        userId: string;
+      };
+    }
+  }
+}
+
+export {};
+
+
+================================================
+FILE: apps/websocket-gateway/package.json
+================================================
+{
+  "name": "@realtime-chat/websocket-gateway",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@realtime-chat/shared-types": "*",
+    "@realtime-chat/shared-utils": "*",
+    "@realtime-chat/shared-events": "*",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.0",
+    "helmet": "^7.1.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.5.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}
+
+
+================================================
+FILE: apps/websocket-gateway/tsconfig.json
+================================================
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "types":["node"]
+  },
+  "include": ["src/**/*"]
+}
+
+
+================================================
+FILE: apps/websocket-gateway/.env.example
+================================================
+NODE_ENV=development
+PORT=4003
+KAFKA_BROKER=localhost:9095
+JWT_ACCESS_SECRET=change_me_to_a_long_random_string_at_least_32_chars
+REDIS_URL=redis://:realtimepass@localhost:6380
+
+
+================================================
+FILE: apps/websocket-gateway/src/index.ts
+================================================
+
+import express from "express";
+import helmet from "helmet";
+import cors from "cors";
+import type { Request, Response } from "express";
+import { config } from "./config/index.js";
+
+const app = express();
+app.use(helmet());
+app.use(cors());
+app.use(express.json());
+
+app.get("/health", (_req: Request, res: Response) => {
+  res.status(200).json({
+    success: true,
+    service: config.SERVICE_NAME,
+    timestamp: new Date().toISOString(),
+  });
+});
+
+app.listen(config.PORT, () => {
+  console.log(`ðŸš€ ${config.SERVICE_NAME} running on port ${config.PORT}`);
+});
+
+
+================================================
+FILE: apps/websocket-gateway/src/config/index.ts
+================================================
+import { z } from "zod";
+import "dotenv/config";
+
+const envSchema = z.object({
+  NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
+  PORT: z.coerce.number().default(4003),
+  KAFKA_BROKER: z.string().min(1),
+  JWT_ACCESS_SECRET: z.string().min(32),
+  REDIS_URL: z.string().min(1),
+});
+
+const parsed = envSchema.safeParse(process.env);
+
+if (!parsed.success) {
+  console.error("❌ Invalid environment variables:", parsed.error.flatten().fieldErrors);
+  process.exit(1);
+}
+
+export const config = {
+  ...parsed.data,
+  SERVICE_NAME: "websocket-gateway",
+} as const;
+
+
+================================================
+FILE: packages/shared-events/package.json
+================================================
+{
+  "name": "@realtime-chat/shared-events",
+  "version": "1.0.0",
+  "private": true,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch"
+  },
+  "dependencies": {
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0"
+  }
+}
+
+
+================================================
+FILE: packages/shared-events/tsconfig.json
+================================================
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "./dist",
+    "rootDir": "./src"
+  },
+  "include": ["src/**/*"]
+}
+
+
+================================================
+FILE: packages/shared-events/src/index.ts
+================================================
+export * from "./events/chat.js";
+export * from "./events/presence.js";
+
+
+================================================
+FILE: packages/shared-events/src/events/chat.ts
+================================================
+import {z} from "zod";
+
+export const ChatMessageCreatedSchema = z.object({
+  eventId: z.string().uuid(),
+  eventType: z.literal("chat.message.created"),
+  occurredAt: z.string().datetime(),
+  data: z.object({
+    messageId: z.string().uuid(),
+
+        roomId: z.string().uuid(),
+        senderId: z.string().uuid(),
+        content: z.string().min(1).max(5000),
+        createdAt: z.string().datetime(),
+    })
+})
+export type ChatMessageCreatedEvent=z.infer<typeof ChatMessageCreatedSchema>
+
+
+
+================================================
+FILE: packages/shared-events/src/events/presence.ts
+================================================
+import {z} from "zod";
+
+export const PresenceUserOnlineSchema = z.object({
+  eventId: z.string().uuid(),
+  eventType: z.literal("presence.user.online"),
+  occurredAt: z.string().datetime(),
+  data: z.object({
+    userId: z.string().uuid(),
+        connectedAt: z.string().datetime(),
+  })
+})
+
+export const PresenceUserOfflineSchema = z.object({
+  eventId: z.string().uuid(),
+  eventType: z.literal("presence.user.offline"),
+  occurredAt: z.string().datetime(),
+  data: z.object({
+    userId: z.string().uuid(),
+    disconnectedAt: z.string().datetime(),
+  }),
+});
+
+export type PresenceUserOnlineEvent = z.infer<typeof PresenceUserOnlineSchema>;
+export type PresenceUserOfflineEvent = z.infer<typeof PresenceUserOfflineSchema>;
+
+
+================================================
+FILE: packages/shared-types/package.json
+================================================
+{
+  "name": "@realtime-chat/shared-types",
+  "version": "1.0.0",
+  "private": true,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0"
+  }
+}
+
+
+================================================
+FILE: packages/shared-types/tsconfig.json
+================================================
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "./dist",
+    "rootDir": "./src"
+  },
+  "include": ["src/**/*"]
+}
+
+
+================================================
+FILE: packages/shared-types/src/index.ts
+================================================
+export type Uuid = string;
+export interface ApiResponse<T = unknown>{
+  success: boolean;
+  message?: string;
+  data?: T;
+  error?:string
+}
+
+
+
+================================================
+FILE: packages/shared-utils/package.json
+================================================
+{
+  "name": "@realtime-chat/shared-utils",
+  "version": "1.0.0",
+  "private": true,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch"
+  },
+  "dependencies": {
+    "express": "^4.22.3",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.25",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0"
+  }
+}
+
+
+
+================================================
+FILE: packages/shared-utils/tsconfig.json
+================================================
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "types":["node"]
+  },
+  "include": ["src/**/*"]
+}
+
+
+================================================
+FILE: packages/shared-utils/src/asyncHandler.ts
+================================================
+import type { Request, Response, NextFunction, RequestHandler } from "express";
+
+export const asyncHandler = (
+  fn: (req: Request, res: Response, next: NextFunction) => Promise<void>
+): RequestHandler => {
+  return (req, res, next) => {
+    Promise.resolve(fn(req, res, next)).catch(next);
+  };
+};
+
+
+================================================
+FILE: packages/shared-utils/src/errors.ts
+================================================
+export class AppError extends Error{
+  public readonly statusCode: number;
+  public readonly code: string;
+  public readonly isOperational: boolean;
+
+  constructor(message: string, statusCode: number, code: string) {
+    super(message);
+    this.statusCode = statusCode;
+    this.code = code;
+    this.isOperational = true;
+    Error.captureStackTrace(this, this.constructor);
+  }
+}
+
+  export class BadRequestError extends AppError {
+    constructor(message = "Bad Request", code = "BAD_REQUEST") {
+      super(message, 400, code);
+    }
+  }
+
+  export class UnauthorizedError extends AppError {
+    constructor(message = "Unauthorized", code = "UNAUTHORIZED") {
+      super(message, 401, code);
+    }
+  }
+
+  export class ForbiddenError extends AppError {
+    constructor(message = "Forbidden", code = "FORBIDDEN") {
+      super(message, 403, code);
+    }
+  }
+
+  export class NotFoundError extends AppError {
+    constructor(message = "Not Found", code = "NOT_FOUND") {
+      super(message, 404, code);
+    }
+  }
+
+  export class ConflictError extends AppError {
+    constructor(message = "Conflict", code = "CONFLICT") {
+      super(message, 409, code);
+    }
+  }
+
+  export class InternalServerError extends AppError {
+    constructor(message = "Internal Server Error", code = "INTERNAL_SERVER_ERROR") {
+      super(message, 500, code);
+    }
+  }
+
+
+
+================================================
+FILE: packages/shared-utils/src/index.ts
+================================================
+export * from "./asyncHandler.js";
+export * from "./errors.js"
+

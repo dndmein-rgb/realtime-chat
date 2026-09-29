@@ -9,6 +9,14 @@ const envSchema = z.object({
       JWT_REFRESH_SECRET: z.string().min(32),
       ACCESS_TOKEN_EXP: z.string().default("15m"),
       REFRESH_TOKEN_EXP: z.string().default("7d"),
+  REDIS_URL: z.string(),
+  REFRESH_TOKEN_TTL_SECONDS: z.coerce.number().int().positive().default(604800),
+  CLIENT_ORIGINS: z
+    .string()
+    .min(1)
+    .transform((value) =>
+      value.split(",").map((origin) => origin.trim()),
+    ),
 })
 
 const parsed = envSchema.safeParse(process.env);

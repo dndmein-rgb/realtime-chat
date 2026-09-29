@@ -1,4 +1,4 @@
-import { prisma } from "../../config/prisma.js";
+import { prisma } from "../../infrastructure/prisma.js";
 import { AuthInterface } from "./auth.interface.js";
 import { CreateUserData, SafeUser } from "./auth.types.js";
 

@@ -38,6 +38,7 @@ services:
       REDIS_ARGS: "--requirepass realtimepass"
     ports:
       - "6380:6379"                       # different host port
+      - "8001:8001"
     volumes:
       - realtime_redis_data:/data
     networks:
@@ -64,7 +65,7 @@ services:
     depends_on:
       - zookeeper
     ports:
-      - "9094:9092"
+      - "9095:9092"
       - "9095:9093"                       # different host ports
     environment:
       KAFKA_BROKER_ID: 1

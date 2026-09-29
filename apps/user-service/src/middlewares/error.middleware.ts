@@ -13,10 +13,10 @@ export const errorHandler = (err:Error,_req:Request,res:Response,_next:NextFunct
         });
         return;
   }
-  logger.error("Unhandled error", {
+  logger.error( {
     message: err.message,
     stack: err.stack,
-  });
+  },"Unhandled error",);
 
   res.status(500).json({
       success: false,
