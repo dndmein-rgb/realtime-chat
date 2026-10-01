@@ -17,4 +17,5 @@ if (!parsed.success) {
 export const config = {
   ...parsed.data,
   SERVICE_NAME: "notification-service",
+  KAFKA_GROUP_ID: "notification-service",
 } as const;

@@ -13,7 +13,7 @@
     "dev:presence": "npm run dev -w @realtime-chat/presence-service",
     "dev:notification": "npm run dev -w @realtime-chat/notification-service",
     
-    "build:shared": "npm run build --workspaces --if-present --workspace=@realtime-chat/shared-types --workspace=@realtime-chat/shared-events --workspace=@realtime-chat/shared-utils",
+    "build:shared": "npm run build --workspaces --if-present --workspace=@realtime-chat/shared-types --workspace=@realtime-chat/shared-events --workspace=@realtime-chat/shared-utils --workspace=@realtime-chat/shared-kafka",
     "build:apps": "npm run build --workspaces --if-present --workspace=@realtime-chat/user-service --workspace=@realtime-chat/chat-service --workspace=@realtime-chat/websocket-gateway --workspace=@realtime-chat/presence-service --workspace=@realtime-chat/notification-service",
     "build": "npm run build:shared && npm run build:apps",
 

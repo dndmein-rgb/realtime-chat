@@ -6,7 +6,13 @@ const envSchema = z.object({
   PORT: z.coerce.number().default(4002),
   DATABASE_URL: z.string().min(1),
   KAFKA_BROKER: z.string().min(1),
-});
+  JWT_ACCESS_SECRET: z.string().min(32),
+  CLIENT_ORIGINS: z
+      .string()
+      .min(1)
+      .transform((value) => value.split(",").map((origin) => origin.trim())),
+
+  });
 
 const parsed = envSchema.safeParse(process.env);
 
