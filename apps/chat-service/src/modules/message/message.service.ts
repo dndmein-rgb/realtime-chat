@@ -34,7 +34,7 @@ export class MessageService {
         eventType: "chat.message.created",
         occurredAt: now.toISOString(),
         data: {
-          messageId: "", 
+          messageId, 
           roomId,
           senderId,
           content,

@@ -30,7 +30,8 @@ export class MessageRepository implements MessageInterface {
   async createWithOutbox(messageId:string,roomId: string, senderId: string, content: string, event: ChatMessageCreatedEvent): Promise<MessageView> {
     return prisma.$transaction(async (tx) => {
       const message = await tx.message.create({
-        data:{id:messageId,roomId,senderId,content}
+        data: { id: messageId, roomId, senderId, content },
+        select:messageSelect
       })
       await tx.room.update({
         where: { id: roomId },

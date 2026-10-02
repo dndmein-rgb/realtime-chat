@@ -7,7 +7,13 @@ const envSchema = z.object({
   KAFKA_BROKER: z.string().min(1),
   JWT_ACCESS_SECRET: z.string().min(32),
   REDIS_URL: z.string().min(1),
-});
+  CHAT_SERVICE_URL: z.string().url(),
+    CLIENT_ORIGINS: z
+      .string()
+      .min(1)
+      .transform((value) => value.split(",").map((o) => o.trim())),
+  });
+
 
 const parsed = envSchema.safeParse(process.env);
 
