@@ -1,6 +1,8 @@
+import { ChatMessageCreatedEvent } from "@realtime-chat/shared-events";
 import { prisma } from "../../infrastructure/prisma.js";
 import { MessageInterface } from "./message.interface.js";
 import type { MessageView, PaginatedMessages } from "./message.types.js";
+import { TOPICS } from "@realtime-chat/shared-kafka";
 
 const messageSelect = {
   id: true,
@@ -20,6 +22,29 @@ export class MessageRepository implements MessageInterface {
       data: { roomId, content, senderId },
       select: messageSelect,
     });
+  }
+
+  /**
+     * Atomic: message + room touch + outbox row
+     */
+  async createWithOutbox(messageId:string,roomId: string, senderId: string, content: string, event: ChatMessageCreatedEvent): Promise<MessageView> {
+    return prisma.$transaction(async (tx) => {
+      const message = await tx.message.create({
+        data:{id:messageId,roomId,senderId,content}
+      })
+      await tx.room.update({
+        where: { id: roomId },
+        data:{updatedAt:new Date()}
+      })
+      await tx.outBox.create({
+        data: {
+          key: roomId,
+          topic: TOPICS.CHAT_MESSAGE_CREATED,
+          payload:event as any
+        }
+      })
+      return message
+    })
   }
   async listByRoom(
     roomId: string,

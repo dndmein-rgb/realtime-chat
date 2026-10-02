@@ -5,6 +5,7 @@ import { prisma } from "./infrastructure/prisma.js";
 import { config } from "./config/index.js";
 import app from "./app.js";
 import { kafkaProducer } from "./infrastructure/kafka.js";
+import { outBoxPublisher } from "./infrastructure/outbox-publisher.js";
 
 let server: Server | undefined;
 let isShuttingDown = false;
@@ -19,6 +20,7 @@ const shutdown = async (signal: string): Promise<void> => {
   logger.info(`Received ${signal}. Starting graceful shutdown...`);
 
   try {
+    outBoxPublisher.stop();
     if (server) {
       await new Promise<void>((resolve, reject) => {
         server!.close((error) => {
@@ -46,6 +48,7 @@ const startServer = async (): Promise<void> => {
   try {
     await kafkaProducer.connect();
     logger.info("Kafka producer connected");
+    outBoxPublisher.start();
     const httpServer = app.listen(config.PORT, () => {
       logger.info(
         `${config.SERVICE_NAME} is running on http://localhost:${config.PORT}`,

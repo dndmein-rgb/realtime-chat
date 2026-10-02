@@ -66,7 +66,7 @@ services:
       - zookeeper
     ports:
       - "9095:9092"
-      - "9095:9093"                       # different host ports
+      - "9096:9093"                       # different host ports
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181

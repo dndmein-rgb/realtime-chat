@@ -5,8 +5,7 @@ import { MessageView, PaginatedMessages } from "./message.types.js";
 import { logger } from "../../config/logger.js";
 import { ChatMessageCreatedEvent } from "@realtime-chat/shared-events";
 import { randomUUID } from "node:crypto";
-import { kafkaProducer } from "../../infrastructure/kafka.js";
-import { TOPICS } from "@realtime-chat/shared-kafka";
+
 
 export class MessageService {
   constructor(
@@ -23,46 +22,41 @@ export class MessageService {
     if (!isMember) {
       throw new ForbiddenError("You are not a member of this room");
     }
+    // Build the event first so we can store it in the outbox
+    
+      const messageId = randomUUID();
+      const eventId = randomUUID();
+      const now = new Date();
+    
 
-    const message = await this.messageRepo.create(roomId, senderId, content);
-
-    // Touch room updatedAt so it sorts correctly in "my rooms"
-    await this.messageRepo.prismaRoomTouch(roomId);
-
-    // Publish domain event (fire-and-forget with logging on failure)
     const event: ChatMessageCreatedEvent = {
-      eventId: randomUUID(),
-      eventType: "chat.message.created",
-      occurredAt: new Date().toISOString(),
-      data: {
-        messageId: message.id,
-        roomId: message.roomId,
-        senderId: message.senderId,
-        content: message.content,
-        createdAt:message.createdAt.toISOString()
-      }
-    }
-    try {
-      await kafkaProducer.send(TOPICS.CHAT_MESSAGE_CREATED, roomId, event)
-      logger.info(
-      "Published chat.message.created",
-              {
-                messageId: message.id,
-                roomId,
-                eventId: event.eventId,
-              },
-              
-            );
-    } catch (error) {
-      // Message is already persisted; event publish failure should not fail the HTTP request
-            logger.error("Failed to publish chat.message.created", error);
-    }
+        eventId,
+        eventType: "chat.message.created",
+        occurredAt: now.toISOString(),
+        data: {
+          messageId: "", 
+          roomId,
+          senderId,
+          content,
+          createdAt: now.toISOString(),
+        },
+      };
 
-    logger.info("Message sent", {
-      messageId: message.id,
-      roomId,
-      senderId,
-    });
+    // You need to change createWithOutbox to accept a pre-generated id
+      const message = await this.messageRepo.createWithOutbox(
+        messageId,
+        roomId,
+        senderId,
+        content,
+        event,
+    );
+      logger.info("Message sent (outbox)", {
+          messageId: message.id,
+          roomId,
+          senderId,
+          eventId: event.eventId,
+        });
+      
 
     return message;
   }

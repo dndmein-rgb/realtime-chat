@@ -6,7 +6,7 @@ import type {
 import jwt from "jsonwebtoken";
 
 import { UnauthorizedError } from "@realtime-chat/shared-utils";
-import { verifyAccessToken } from "./modules/auth/auth.token.utils.js";
+import { verifyAccessToken } from "../utils/token.js";
 
 export const authenticate = (
   req: Request,

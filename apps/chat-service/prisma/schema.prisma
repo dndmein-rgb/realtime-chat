@@ -55,3 +55,16 @@ room Room @relation(fields:[roomId],references:[id],onDelete:Cascade)
 @@index([roomId, createdAt(sort: Desc)])
 @@map("messages")
 }
+
+model OutBox{
+id              String       @id @default(uuid())
+topic           String
+key              String        // partition key (roomId)
+payload         Json
+createdAt   DateTime @default(now())
+publishedAt DateTime?        // null = not yet published
+attempts    Int      @default(0)
+
+@@index([publishedAt, createdAt])   // for the poller
+@@map("outbox")
+}
