@@ -8,7 +8,7 @@
     "build": "tsc",
     "start": "node dist/server.js",
     "db:generate": "npx prisma generate",
-    "db:migrate": "npx prisma migrate dev",
+    "db:migrate": "npx prisma migrate dev --name init",
     "db:studio": "npx prisma studio"
   },
   "dependencies": {

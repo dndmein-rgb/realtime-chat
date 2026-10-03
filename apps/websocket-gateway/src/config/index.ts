@@ -25,4 +25,5 @@ if (!parsed.success) {
 export const config = {
   ...parsed.data,
   SERVICE_NAME: "websocket-gateway",
+  KAFKA_GROUP_ID:"websocket-gateway"
 } as const;

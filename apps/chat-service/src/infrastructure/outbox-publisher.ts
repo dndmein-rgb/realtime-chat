@@ -70,9 +70,9 @@ export class OutBoxPublisher {
       >`
         SELECT id, topic, key, payload, attempts
         FROM outbox
-        WHERE published_at IS NULL
+        WHERE "publishedAt" IS NULL
           AND attempts < ${MAX_ATTEMPTS}
-        ORDER BY created_at ASC
+        ORDER BY "createdAt" ASC
         LIMIT ${BATCH_SIZE}
         FOR UPDATE SKIP LOCKED
       `;

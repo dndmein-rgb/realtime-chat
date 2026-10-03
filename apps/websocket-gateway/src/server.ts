@@ -10,6 +10,8 @@ import {
 } from "./middlewares/socket-auth.js";
 import { connectionManager } from "./infrastructure/connection-manager.js";
 import { isRoomMember } from "./infrastructure/chat-client.js";
+import { logger } from "./config/logger.js";
+import { startConsumers } from "./infrastructure/kafka.js";
 
 let httpServer: HttpServer | undefined;
 let io: Server | undefined;
@@ -133,21 +135,27 @@ const startServer = async (): Promise<void> => {
       });
     });
 
+    // ---------- start Kafka consumer (needs the io instance) ----------
+    void startConsumers(io).catch((error) => {
+      logger.error("Kafka consumer crashed", error);
+            process.exitCode = 1;
+    })
+
     httpServer.listen(config.PORT, () => {
-      console.log(
+      logger.info(
         `🚀 ${config.SERVICE_NAME} running on http://localhost:${config.PORT}`,
       );
     });
 
     httpServer.on("error", (error) => {
-      console.error("HTTP server error", error);
+      logger.error("HTTP server error", error);
       process.exitCode = 1;
     });
 
     process.on("SIGTERM", () => void shutdown("SIGTERM"));
     process.on("SIGINT", () => void shutdown("SIGINT"));
   } catch (error) {
-    console.error("Failed to start server", error);
+    logger.error("Failed to start server", error);
     process.exitCode = 1;
   }
 };
