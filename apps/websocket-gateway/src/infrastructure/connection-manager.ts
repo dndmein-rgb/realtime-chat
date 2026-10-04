@@ -78,6 +78,23 @@ export class ConnectionManager{
         rooms: this.roomToSockets.size,
       };
     }
+
+getRoomsForUser(userId: string): string[]{
+  const socketIds = this.userToSockets.get(userId);
+  if (!socketIds) {
+    return []
   }
+  const rooms = new Set<string>();
+  for (const [roomId, sockets] of this.roomToSockets) {
+    for (const sid of sockets) {
+      if (socketIds.has(sid)) {
+        rooms.add(roomId)
+        break
+      }
+    }
+  }
+  return Array.from(rooms);
+}
+}
   
   export const connectionManager = new ConnectionManager();

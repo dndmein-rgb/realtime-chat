@@ -43,3 +43,28 @@ export const listMessages = asyncHandler(async (req: Request, res: Response) => 
     data: result,
   });
 });
+
+export const markMessagesSeen = asyncHandler(async (req: Request, res: Response) => {
+  if (!req.user) {
+    throw new UnauthorizedError("Authentication required");
+  }
+
+  const roomId = req.params.roomId as string;
+  const { messageIds } = req.body;
+
+  await messageService.markAsSeen(roomId, req.user.userId, messageIds);
+
+  res.status(200).json({
+    success: true,
+    message: "Messages marked as seen",
+  });
+});
+
+export const markMessagesDelivered = asyncHandler(async (req, res) => {
+  const roomId = req.params.roomId as string;
+  const { messageIds } = req.body;
+
+  await messageService.markAsDelivered(roomId, messageIds);
+
+  res.status(200).json({ success: true });
+});

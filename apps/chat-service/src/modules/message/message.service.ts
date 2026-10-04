@@ -79,4 +79,41 @@ export class MessageService {
 
     return this.messageRepo.listByRoom(roomId, limit, before);
   }
+
+  async markAsSeen(roomId: string, userId: string, messageIds: string[]): Promise<void>{
+    const isMember = await this.roomRepo.isMember(roomId, userId);
+    if (!isMember) {
+      throw new ForbiddenError("You are not a member of this room");
+    }
+    if (messageIds.length === 0) return;
+    // Fetch the messages to check sender
+    const messages = await this.messageRepo.getMessages(messageIds,roomId)
+    // Filter out messages the current user sent
+    const allowedIds = messages.filter((m) => m.senderId !== userId).map((m) => m.id)
+    if (allowedIds.length === 0) return;
+    await this.messageRepo.updateStatus(allowedIds, roomId, "SEEN")
+
+    await this.messageRepo.createStatusOutbox(
+      allowedIds.map((messageId) => ({
+            messageId,
+            roomId,
+            status: "SEEN" as const,
+            userId,
+          })),
+    )
+    logger.info("Messages marked as SEEN", { roomId, userId, count: allowedIds.length });
+  }
+
+   async markAsDelivered(roomId: string, messageIds: string[]): Promise<void>{
+    if (messageIds.length === 0) return;
+     await this.messageRepo.updateStatus(messageIds, roomId, "DELIVERED")
+     await this.messageRepo.createStatusOutbox(
+       messageIds.map((messageId) => ({
+         messageId,
+         roomId,
+         userId:"system",
+         status:"DELIVERED"as const 
+       }))
+     )
+  }
 }

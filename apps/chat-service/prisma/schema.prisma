@@ -17,6 +17,12 @@ ADMIN
 MEMBER
 }
 
+enum MessageStatus{
+SENT
+DELIVERED 
+SEEN
+}
+
 model Room{
 id           String  @id @default(uuid())
 name         String?
@@ -45,10 +51,12 @@ room   Room  @relation(fields:[roomId],references:[id],onDelete:Cascade)
 
 model  Message{
 id            String   @id() @default(uuid())
-roomId         String
-senderId         String
-content   String
-createdAt DateTime @default(now())
+roomId        String
+senderId      String
+content       String
+createdAt     DateTime @default(now())
+
+status        MessageStatus @default(SENT)
 
 room Room @relation(fields:[roomId],references:[id],onDelete:Cascade)
 

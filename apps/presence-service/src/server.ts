@@ -10,6 +10,7 @@ import app from "./app.js";
 let server: Server | undefined;
 let isShuttingDown = false;
 
+
 const shutdown = async (signal: string): Promise<void> => {
   if (isShuttingDown) {
     logger.warn(`Shutdown already in progress; received ${signal} again`);

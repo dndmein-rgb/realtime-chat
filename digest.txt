@@ -71,9 +71,16 @@ Directory structure:
     │   │   ├── tsconfig.json
     │   │   ├── .env.example
     │   │   └── src/
-    │   │       ├── index.ts
-    │   │       └── config/
-    │   │           └── index.ts
+    │   │       ├── app.ts
+    │   │       ├── server.ts
+    │   │       ├── config/
+    │   │       │   ├── index.ts
+    │   │       │   └── logger.ts
+    │   │       └── infrastructure/
+    │   │           ├── kafka.ts
+    │   │           ├── presence-publisher.ts
+    │   │           ├── presence.store.ts
+    │   │           └── redis.ts
     │   ├── user-service/
     │   │   ├── package.json
     │   │   ├── prisma7.config.ts
@@ -132,7 +139,8 @@ Directory structure:
     │           ├── infrastructure/
     │           │   ├── chat-client.ts
     │           │   ├── connection-manager.ts
-    │           │   └── kafka.ts
+    │           │   ├── kafka.ts
+    │           │   └── presence-publisher.ts
     │           ├── middlewares/
     │           │   └── socket-auth.ts
     │           └── utils/
@@ -455,6 +463,12 @@ ADMIN
 MEMBER
 }
 
+enum MessageStatus{
+SENT
+DELIVERED 
+SEEN
+}
+
 model Room{
 id           String  @id @default(uuid())
 name         String?
@@ -483,10 +497,12 @@ room   Room  @relation(fields:[roomId],references:[id],onDelete:Cascade)
 
 model  Message{
 id            String   @id() @default(uuid())
-roomId         String
-senderId         String
-content   String
-createdAt DateTime @default(now())
+roomId        String
+senderId      String
+content       String
+createdAt     DateTime @default(now())
+
+status        MessageStatus @default(SENT)
 
 room Room @relation(fields:[roomId],references:[id],onDelete:Cascade)
 
@@ -2348,18 +2364,21 @@ FILE: apps/presence-service/package.json
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "tsx watch src/index.ts",
+    "dev": "tsx watch src/server.ts",
     "build": "tsc",
-    "start": "node dist/index.js"
+    "start": "node dist/server.js"
   },
   "dependencies": {
     "@realtime-chat/shared-types": "*",
     "@realtime-chat/shared-utils": "*",
     "@realtime-chat/shared-events": "*",
+    "@realtime-chat/shared-kafka": "*",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "express": "^4.21.0",
     "helmet": "^7.1.0",
+    "ioredis": "^6.0.0",
+    "pino": "^10.3.1",
     "zod": "^3.23.8"
   },
   "devDependencies": {
@@ -2396,16 +2415,16 @@ REDIS_URL=redis://:realtimepass@localhost:6380
 
 
 ================================================
-FILE: apps/presence-service/src/index.ts
+FILE: apps/presence-service/src/app.ts
 ================================================
 import express from "express";
 import helmet from "helmet";
 import cors from "cors";
 import type { Request, Response } from "express";
 import { config } from "./config/index.js";
+import { presenceStore } from "./infrastructure/presence.store.js";
 
 const app = express();
-
 app.use(helmet());
 app.use(cors());
 app.use(express.json());
@@ -2418,9 +2437,107 @@ app.get("/health", (_req: Request, res: Response) => {
   });
 });
 
-app.listen(config.PORT, () => {
-  console.log(`ðŸš€ ${config.SERVICE_NAME} running on port ${config.PORT}`);
+// simple public API (protect later if needed)
+app.get("/presence/:userId", async (req: Request, res: Response) => {
+  const userId = req.params.userId as string;
+  const online = await presenceStore.isOnline(userId);
+  const lastSeen = await presenceStore.getLastSeen(userId);
+  res.json({ success: true, data: { userId, online, lastSeen } });
 });
+
+app.get("/presence", async (_req: Request, res: Response) => {
+  const users = await presenceStore.getOnlineUsers();
+  res.json({ success: true, data: { online: users, count: users.length } });
+});
+
+export default app;
+
+
+================================================
+FILE: apps/presence-service/src/server.ts
+================================================
+import "dotenv/config";
+import type { Server } from "node:http";
+
+import { logger } from "./config/logger.js";
+import { config } from "./config/index.js";
+import { kafkaConsumer, startConsumers } from "./infrastructure/kafka.js";
+import { redis } from "./infrastructure/redis.js";
+import app from "./app.js";
+
+let server: Server | undefined;
+let isShuttingDown = false;
+
+
+const shutdown = async (signal: string): Promise<void> => {
+  if (isShuttingDown) {
+    logger.warn(`Shutdown already in progress; received ${signal} again`);
+    return;
+  }
+
+  isShuttingDown = true;
+  logger.info(`Received ${signal}. Starting graceful shutdown...`);
+
+  try {
+    // 1. Stop accepting new HTTP requests
+    if (server) {
+      await new Promise<void>((resolve, reject) => {
+        server!.close((error) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          resolve();
+        });
+      });
+      logger.info("HTTP server closed");
+    }
+
+    // 2. Disconnect Kafka consumer
+    await kafkaConsumer.disconnect();
+    logger.info("Kafka consumer disconnected");
+
+    // 3. Close Redis
+    await redis.quit();
+    logger.info("Redis connection closed");
+
+    logger.info("Graceful shutdown completed");
+  } catch (error) {
+    logger.error("Error during graceful shutdown", error);
+    process.exitCode = 1;
+  }
+};
+
+const startServer = async (): Promise<void> => {
+  try {
+    // Start Kafka consumers in the background (do not block HTTP)
+    void startConsumers().catch((error) => {
+      logger.error("Kafka consumer crashed", error);
+      process.exitCode = 1;
+    });
+
+    const httpServer = app.listen(config.PORT, () => {
+      logger.info(
+        `${config.SERVICE_NAME} is running on http://localhost:${config.PORT}`,
+      );
+    });
+
+    server = httpServer;
+
+    httpServer.on("error", (error) => {
+      logger.error("HTTP server error", error);
+      process.exitCode = 1;
+    });
+
+    process.on("SIGTERM", () => void shutdown("SIGTERM"));
+    process.on("SIGINT", () => void shutdown("SIGINT"));
+  } catch (error) {
+    logger.error("Failed to start server", error);
+    process.exitCode = 1;
+  }
+};
+
+void startServer();
 
 
 ================================================
@@ -2447,6 +2564,363 @@ export const config = {
   ...parsed.data,
   SERVICE_NAME: "presence-service",
 } as const;
+
+
+================================================
+FILE: apps/presence-service/src/config/logger.ts
+================================================
+import pino from "pino";
+import { config } from "./index.js";
+
+const baseLogger = pino({
+  level: config.NODE_ENV === "development" ? "debug" : "info",
+  ...(config.NODE_ENV === "development" && {
+    transport: {
+      target: "pino-pretty",
+      options: {
+        colorize: true,
+        translateTime: "SYS:standard",
+        ignore: "pid,hostname",
+      },
+    },
+  }),
+  base: {
+    service: config.SERVICE_NAME,
+  },
+});
+
+type LogMeta = Record<string, unknown> | Error | unknown;
+
+type LogFn = {
+  (msg: string, meta?: LogMeta): void;
+  (meta: LogMeta, msg?: string): void;
+};
+
+const toMergingObject = (meta?: LogMeta): Record<string, unknown> => {
+  if (meta === undefined || meta === null) {
+    return {};
+  }
+
+  if (meta instanceof Error) {
+    return {
+      err: {
+        message: meta.message,
+        name: meta.name,
+        stack: meta.stack,
+      },
+    };
+  }
+
+  if (typeof meta === "object") {
+    return meta as Record<string, unknown>;
+  }
+
+  // primitive (string/number/boolean) â€“ wrap it
+  return { value: meta };
+};
+
+const createLogFn = (level: "info" | "error" | "warn" | "debug"): LogFn => {
+  return (msgOrMeta: string | LogMeta, maybeMetaOrMsg?: string | LogMeta) => {
+    // Preferred: message first
+    // logger.error("Error during graceful shutdown", error)
+    // logger.info("Member added", { roomId })
+    if (typeof msgOrMeta === "string") {
+      const msg = msgOrMeta;
+      const obj = toMergingObject(maybeMetaOrMsg);
+      baseLogger[level](obj, msg);
+      return;
+    }
+
+    // Also support: object/error first
+    // logger.error(error, "Error during graceful shutdown")
+    // logger.info({ roomId }, "Member added")
+    const obj = toMergingObject(msgOrMeta);
+    const msg = typeof maybeMetaOrMsg === "string" ? maybeMetaOrMsg : undefined;
+
+    if (msg) {
+      baseLogger[level](obj, msg);
+    } else {
+      baseLogger[level](obj);
+    }
+  };
+};
+
+export const logger = {
+  info: createLogFn("info"),
+  error: createLogFn("error"),
+  warn: createLogFn("warn"),
+  debug: createLogFn("debug"),
+  child: baseLogger.child.bind(baseLogger),
+};
+
+
+================================================
+FILE: apps/presence-service/src/infrastructure/kafka.ts
+================================================
+import { createKafkaClient, KafkaConsumer, TOPICS } from "@realtime-chat/shared-kafka";
+import { config } from "../config/index.js";
+import { logger } from "../config/logger.js";
+import { PresenceUserOfflineSchema, PresenceUserOnlineSchema } from "@realtime-chat/shared-events";
+import { presenceStore } from "./presence.store.js";
+
+const kafka = createKafkaClient({
+  clientId: "presence-service",
+  brokers:[config.KAFKA_BROKER]
+})
+
+export const kafkaConsumer = new KafkaConsumer(kafka, "presence-service")
+
+export const startConsumers = async (): Promise<void>=>{
+  await kafkaConsumer.connect();
+  await kafkaConsumer.subscribe([TOPICS.PRESENCE_USER_OFFLINE, TOPICS.PRESENCE_USER_ONLINE])
+  logger.info("Presence consumer subscribed", {
+      topics: [TOPICS.PRESENCE_USER_ONLINE, TOPICS.PRESENCE_USER_OFFLINE],
+    });
+
+  await kafkaConsumer.run(async ({topic,value,partition,offset }) => {
+    if (topic === TOPICS.PRESENCE_USER_ONLINE) {
+      const parsed = PresenceUserOnlineSchema.safeParse(value);
+      if (!parsed.success) {
+        logger.warn({ issues: parsed.error.flatten() }, "Invalid online event â€“ skip");
+                return;
+      }
+      await presenceStore.setOnline(parsed.data.data.userId)
+      logger.info("User online", { userId: parsed.data.data.userId, partition, offset });
+            return;
+    }
+    if (topic === TOPICS.PRESENCE_USER_OFFLINE) {
+          const parsed = PresenceUserOfflineSchema.safeParse(value);
+          if (!parsed.success) {
+            logger.warn({ issues: parsed.error.flatten() }, "Invalid offline event â€“ skip");
+            return;
+          }
+          await presenceStore.setOffline(parsed.data.data.userId);
+          logger.info("User offline", { userId: parsed.data.data.userId, partition, offset });
+        }
+  })
+} 
+
+
+
+================================================
+FILE: apps/presence-service/src/infrastructure/presence-publisher.ts
+================================================
+import { createKafkaClient, KafkaProducer, TOPICS } from "@realtime-chat/shared-kafka";
+import { config } from "../config/index.js";
+import { logger } from "../config/logger.js";
+import { PresenceUserOfflineEvent, PresenceUserOnlineEvent } from "@realtime-chat/shared-events";
+import { randomUUID } from "node:crypto";
+
+const kafka = createKafkaClient({
+  clientId: "websocket-gateway-presence",
+  brokers:[config.KAFKA_BROKER]
+})
+
+const producer = new KafkaProducer(kafka)
+export async function connectPresencePublisher(): Promise<void> {
+  await producer.connect();
+  logger.info("Presence Kafka producer connected");
+}
+
+export async function disconnectPresencePublisher(): Promise<void> {
+  await producer.disconnect();
+  logger.info("Presence Kafka producer disconnected");
+}
+export async function publishUserOnline(userId: string): Promise<void> {
+  const event: PresenceUserOnlineEvent = {
+    eventId: randomUUID(),
+    eventType: "presence.user.online",
+    occurredAt: new Date().toISOString(),
+    data: {
+      userId,
+      connectedAt: new Date().toISOString()
+    }
+    
+  }
+  await producer.send(TOPICS.PRESENCE_USER_ONLINE, userId, event)
+  logger.debug("Published presence.user.online", { userId, eventId: event.eventId });
+
+}
+  export async function publishUserOffline(userId: string): Promise<void> {
+    const event: PresenceUserOfflineEvent = {
+      eventId: randomUUID(),
+      eventType: "presence.user.offline",
+      occurredAt: new Date().toISOString(),
+      data: {
+        userId,
+        disconnectedAt: new Date().toISOString(),
+      },
+    };
+  
+    await producer.send(TOPICS.PRESENCE_USER_OFFLINE, userId, event);
+    logger.debug("Published presence.user.offline", { userId, eventId: event.eventId });
+  }
+
+
+================================================
+FILE: apps/presence-service/src/infrastructure/presence.store.ts
+================================================
+import { redis } from "./redis.js";
+
+const ONLINE_KEY ="presence:online" // Redis SET of userIds
+const LAST_SEEN_PREFIX = "presence:lastseen"
+const HEARTBEAT_TTL_SECONDS = 45; // client should send heartbeat every ~20-25s
+
+export class PresenceStore{
+  async setOnline(userId: string): Promise<void>{
+    const multi = redis.multi();
+    await redis.sadd(ONLINE_KEY, userId)
+    await redis.set(`${LAST_SEEN_PREFIX}${userId}`, new Date().toISOString())
+    await redis.expire(`${LAST_SEEN_PREFIX}${userId}`, HEARTBEAT_TTL_SECONDS)
+    // Also expire membership if no heartbeat arrives
+        multi.expire(`presence:member:${userId}`, HEARTBEAT_TTL_SECONDS);
+    await multi.exec();
+    // Keep the SET member alive with a separate key that has TTL
+    await redis.set(`presence-member:${userId}`,"1","EX",HEARTBEAT_TTL_SECONDS)
+  }
+  async setOffline(userId: string): Promise<void> {
+    await redis.srem(ONLINE_KEY, userId);
+    await redis.del(`presence:member:${userId}`);
+      await redis.set(`${LAST_SEEN_PREFIX}${userId}`, new Date().toISOString());
+  }
+
+  async isOnline(userId: string): Promise<boolean>{
+   return (await redis.sismember(ONLINE_KEY,userId))===1
+  }
+  async getOnlineUsers(): Promise<string[]> {
+      // Clean approach: only return users that still have the TTL key
+      const members = await redis.smembers(ONLINE_KEY);
+      if (members.length === 0) return [];
+  
+      const pipeline = redis.pipeline();
+      members.forEach((id) => pipeline.exists(`presence:member:${id}`));
+      const results = await pipeline.exec();
+  
+      return members.filter((_, i) => results?.[i]?.[1] === 1);
+    }
+  
+    async getLastSeen(userId: string): Promise<string | null> {
+      return redis.get(`${LAST_SEEN_PREFIX}${userId}`);
+    }
+}
+
+export const presenceStore = new PresenceStore();
+
+
+================================================
+FILE: apps/presence-service/src/infrastructure/redis.ts
+================================================
+import { Redis } from "ioredis";
+import { config } from "../config/index.js";
+import { logger } from "../config/logger.js";
+
+
+class RedisClient {
+  private static instance: Redis | null = null;
+  private static connected = false;
+
+  private constructor() {}
+
+  static getInstance(): Redis {
+    if (RedisClient.instance) {
+      return RedisClient.instance;
+    }
+
+    const client = new Redis(config.REDIS_URL, {
+      retryStrategy: (times: number) => {
+        const delay = Math.min(times * 500, 5000);
+
+        logger.warn(
+          { attempt: times, delayMs: delay },
+          "Redis reconnect attempt",
+        );
+
+        return delay;
+      },
+      maxRetriesPerRequest: 3,
+      enableReadyCheck: true,
+    });
+
+    RedisClient.instance = client;
+    RedisClient.setupEventListeners(client);
+
+    return client;
+  }
+
+  private static setupEventListeners(client: Redis): void {
+    client.on("connect", () => {
+      logger.info("Redis TCP connection established");
+    });
+
+    client.on("ready", () => {
+      RedisClient.connected = true;
+      logger.info("Redis client is ready");
+    });
+
+    client.on("error", (error: Error) => {
+      RedisClient.connected = false;
+      logger.error({ err: error }, "Redis connection error");
+    });
+
+    client.on("close", () => {
+      RedisClient.connected = false;
+      logger.warn("Redis connection closed");
+    });
+
+    client.on("reconnecting", () => {
+      RedisClient.connected = false;
+      logger.warn("Reconnecting to Redis");
+    });
+
+    client.on("end", () => {
+      RedisClient.connected = false;
+      logger.warn("Redis connection ended");
+    });
+  }
+
+  static isReady(): boolean {
+    return RedisClient.connected;
+  }
+
+  static async testConnection(): Promise<boolean> {
+    try {
+      const response = await RedisClient.getInstance().ping();
+
+      if (response === "PONG") {
+        logger.info("Redis ping successful");
+        return true;
+      }
+
+      return false;
+    } catch (error) {
+      logger.error({ err: error }, "Redis connection test failed");
+      return false;
+    }
+  }
+
+  static async closeConnection(): Promise<void> {
+    const client = RedisClient.instance;
+
+    if (!client) {
+      return;
+    }
+
+    try {
+      await client.quit();
+      logger.info("Redis connection closed gracefully");
+    } catch (error) {
+      logger.error({ err: error }, "Error closing Redis connection");
+      client.disconnect();
+    } finally {
+      RedisClient.instance = null;
+      RedisClient.connected = false;
+    }
+  }
+}
+
+export const redis = RedisClient.getInstance();
+
+export default RedisClient;
 
 
 ================================================
@@ -3912,10 +4386,30 @@ import { connectionManager } from "./infrastructure/connection-manager.js";
 import { isRoomMember } from "./infrastructure/chat-client.js";
 import { logger } from "./config/logger.js";
 import { startConsumers } from "./infrastructure/kafka.js";
+import {
+  connectPresencePublisher,
+  disconnectPresencePublisher,
+  publishUserOffline,
+  publishUserOnline,
+} from "./infrastructure/presence-publisher.js";
 
 let httpServer: HttpServer | undefined;
 let io: Server | undefined;
 let isShuttingDown = false;
+
+
+function broadcastPresence(socketServer: Server, userId: string, event: "presence-offline" | "presence-online", payload: object) {
+  // Get all rooms this user is currently in (from connectionManager)
+  const rooms = connectionManager.getRoomsForUser(userId);
+  if (rooms.length === 0) {
+      // fallback: still useful for global online list
+      socketServer.emit(event, payload);
+      return;
+  }
+  for (const roomId of rooms) {
+    socketServer.to(roomId).emit(event,payload)
+  }
+}
 
 const shutdown = async (signal: string): Promise<void> => {
   if (isShuttingDown) {
@@ -3942,7 +4436,7 @@ const shutdown = async (signal: string): Promise<void> => {
       });
       console.log("HTTP server closed");
     }
-
+    await disconnectPresencePublisher();
     console.log("Graceful shutdown completed");
   } catch (error) {
     console.error("Error during graceful shutdown", error);
@@ -3954,15 +4448,18 @@ const startServer = async (): Promise<void> => {
   try {
     httpServer = createServer(app);
 
-    io = new Server(httpServer, {
+    const socketServer = new Server(httpServer, {
       cors: {
         origin: config.CLIENT_ORIGINS,
         credentials: true,
       },
     });
 
+    io = socketServer;
     // Auth middleware â€“ runs before "connection"
     io.use(socketAuthMiddleware);
+
+    await connectPresencePublisher();
 
     io.on("connection", (rawSocket) => {
       const socket = rawSocket as AuthenticatedSocket;
@@ -3970,15 +4467,21 @@ const startServer = async (): Promise<void> => {
       const socketId = socket.id;
 
       connectionManager.addConnection(socketId, userId);
+
+      // Publish to Kafka (for presence-service)
+      void publishUserOnline(userId); // fire-and-forget
+
+      broadcastPresence(socketServer, userId, "presence-online", {
+        userId,
+        connectedAt:new Date().toISOString()
+      })
+
       console.log(`[gateway] connected user=${userId} socket=${socketId}`);
 
       // ---------- join-room ----------
       socket.on(
         "join-room",
-        async (
-          payload: { roomId?: string },
-          ack?: (res: unknown) => void,
-        ) => {
+        async (payload: { roomId?: string }, ack?: (res: unknown) => void) => {
           const roomId = payload?.roomId;
           if (!roomId) {
             ack?.({ success: false, error: "roomId is required" });
@@ -4002,6 +4505,54 @@ const startServer = async (): Promise<void> => {
 
           console.log(`[gateway] user=${userId} joined room=${roomId}`);
           ack?.({ success: true, roomId });
+        },
+      );
+
+      // ---------- presence heartbeat ----------
+      socket.on("presence:heartbeat", () => {
+        // Just touch the Redis key via presence-service or keep a local map.
+        // For simplicity we re-publish online (idempotent).
+        void publishUserOnline(userId);
+      });
+      // ---------- typing indicators ----------
+      socket.on("typing:start", async(payload:{roomId?:string},ack?:(res:unknown)=>void) => {
+        const roomId = payload?.roomId
+        if (!roomId) {
+          ack?.({ success: false, error: "roomId is required" });
+                return;
+        }
+        const token = socket.handshake.auth?.token as string | undefined
+        if (!token) {
+          ack?.({ success: false, error: "Missing token" });
+                return;
+        }
+        const allowed = await isRoomMember(roomId, token)
+        if (!allowed) {
+              ack?.({ success: false, error: "Not a member of this room" });
+              return;
+        }
+        // Broadcast to everyone else in the room
+        socket.to(roomId).emit("typing:start", {
+          roomId,userId
+        })
+        ack?.({ success: true });
+      })
+
+      socket.on(
+        "typing:stop",
+        (payload: { roomId?: string }, ack?: (res: unknown) => void) => {
+          const roomId = payload?.roomId;
+          if (!roomId) {
+            ack?.({ success: false, error: "roomId is required" });
+            return;
+          }
+      
+          socket.to(roomId).emit("typing:stop", {
+            roomId,
+            userId,
+          });
+      
+          ack?.({ success: true });
         },
       );
 
@@ -4032,14 +4583,22 @@ const startServer = async (): Promise<void> => {
           `[gateway] disconnected user=${uid} socket=${socketId} reason=${reason} last=${wasLastConnection}`,
         );
         // Phase 9 will emit presence.user.offline when wasLastConnection === true
+        if (wasLastConnection && uid) {
+          void publishUserOffline(uid);
+          // Real-time broadcast to all connected clients
+          socketServer.emit("presence:offline", {
+            userId: uid,
+            disconnectedAt: new Date().toISOString(),
+          });
+        }
       });
     });
 
     // ---------- start Kafka consumer (needs the io instance) ----------
     void startConsumers(io).catch((error) => {
       logger.error("Kafka consumer crashed", error);
-            process.exitCode = 1;
-    })
+      process.exitCode = 1;
+    });
 
     httpServer.listen(config.PORT, () => {
       logger.info(
@@ -4061,6 +4620,7 @@ const startServer = async (): Promise<void> => {
 };
 
 void startServer();
+
 
 
 ================================================
@@ -4289,7 +4849,24 @@ export class ConnectionManager{
         rooms: this.roomToSockets.size,
       };
     }
+
+getRoomsForUser(userId: string): string[]{
+  const socketIds = this.userToSockets.get(userId);
+  if (!socketIds) {
+    return []
   }
+  const rooms = new Set<string>();
+  for (const [roomId, sockets] of this.roomToSockets) {
+    for (const sid of sockets) {
+      if (socketIds.has(sid)) {
+        rooms.add(roomId)
+        break
+      }
+    }
+  }
+  return Array.from(rooms);
+}
+}
   
   export const connectionManager = new ConnectionManager();
 
@@ -4355,6 +4932,76 @@ export const startConsumers = async (io: Server):Promise<void> => {
   })
 
   
+}
+
+
+================================================
+FILE: apps/websocket-gateway/src/infrastructure/presence-publisher.ts
+================================================
+import { randomUUID } from "node:crypto";
+import {
+  createKafkaClient,
+  KafkaProducer,
+  TOPICS,
+} from "@realtime-chat/shared-kafka";
+import type {
+  PresenceUserOnlineEvent,
+  PresenceUserOfflineEvent,
+} from "@realtime-chat/shared-events";
+import { config } from "../config/index.js";
+import { logger } from "../config/logger.js";
+
+const kafka = createKafkaClient({
+  clientId: "websocket-gateway-presence",
+  brokers: [config.KAFKA_BROKER],
+});
+
+const producer = new KafkaProducer(kafka);
+
+export async function connectPresencePublisher(): Promise<void> {
+  await producer.connect();
+  logger.info("Presence Kafka producer connected");
+}
+
+export async function disconnectPresencePublisher(): Promise<void> {
+  await producer.disconnect();
+  logger.info("Presence Kafka producer disconnected");
+}
+
+export async function publishUserOnline(userId: string): Promise<void> {
+  const event: PresenceUserOnlineEvent = {
+    eventId: randomUUID(),
+    eventType: "presence.user.online",
+    occurredAt: new Date().toISOString(),
+    data: {
+      userId,
+      connectedAt: new Date().toISOString(),
+    },
+  };
+
+  await producer.send(TOPICS.PRESENCE_USER_ONLINE, userId, event);
+  logger.debug("Published presence.user.online", {
+    userId,
+    eventId: event.eventId,
+  });
+}
+
+export async function publishUserOffline(userId: string): Promise<void> {
+  const event: PresenceUserOfflineEvent = {
+    eventId: randomUUID(),
+    eventType: "presence.user.offline",
+    occurredAt: new Date().toISOString(),
+    data: {
+      userId,
+      disconnectedAt: new Date().toISOString(),
+    },
+  };
+
+  await producer.send(TOPICS.PRESENCE_USER_OFFLINE, userId, event);
+  logger.debug("Published presence.user.offline", {
+    userId,
+    eventId: event.eventId,
+  });
 }
 
 
@@ -4448,7 +5095,7 @@ export * from "./events/presence.js";
 ================================================
 FILE: packages/shared-events/src/events/chat.ts
 ================================================
-import {z} from "zod";
+import { z } from "zod";
 
 export const ChatMessageCreatedSchema = z.object({
   eventId: z.string().uuid(),
@@ -4456,14 +5103,26 @@ export const ChatMessageCreatedSchema = z.object({
   occurredAt: z.string().datetime(),
   data: z.object({
     messageId: z.string().uuid(),
+    roomId: z.string().uuid(),
+    senderId: z.string().uuid(),
+    content: z.string().min(1).max(5000),
+    createdAt: z.string().datetime(),
+  }),
+});
 
-        roomId: z.string().uuid(),
-        senderId: z.string().uuid(),
-        content: z.string().min(1).max(5000),
-        createdAt: z.string().datetime(),
-    })
+export const MessageStatusUpdatedSchema = z.object({
+  eventId: z.string().uuid(),
+  eventType: z.literal("chat.message.created"),
+  occurredAt: z.string().datetime(),
+  data: z.object({
+    messageId: z.string().uuid(),
+    roomId: z.string().uuid(),
+    status: z.enum(["DELIVERED", "SEEN"]),
+      userId:z.string().uuid()// who marked it
+  })
 })
-export type ChatMessageCreatedEvent=z.infer<typeof ChatMessageCreatedSchema>
+export type ChatMessageCreatedEvent = z.infer<typeof ChatMessageCreatedSchema>;
+export type MessageStatusUpdatedEvent = z.infer<typeof MessageStatusUpdatedSchema>;
 
 
 
@@ -4711,10 +5370,12 @@ FILE: packages/shared-kafka/src/topics.ts
 export const TOPICS = {
   CHAT_MESSAGE_CREATED: "chat.message.created",
   PRESENCE_USER_ONLINE: "presence.user.online",
-  PRESENCE_USER_OFFLINE:"presence.user.offline"
+  PRESENCE_USER_OFFLINE: "presence.user.offline",
+  CHAT_MESSAGE_STATUS:   "chat_message_status"
 }
 
 export type TopicName=(typeof TOPICS)[keyof typeof TOPICS]
+
 
 
 ================================================

@@ -4,6 +4,7 @@ export interface MessageView {
   content: string;
   senderId: string;
   createdAt: Date;
+  status:"SENT"|"DELIVERED"|"SEEN"
 }
 
 
