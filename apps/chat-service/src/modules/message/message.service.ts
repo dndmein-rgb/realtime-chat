@@ -111,7 +111,6 @@ export class MessageService {
        messageIds.map((messageId) => ({
          messageId,
          roomId,
-         userId:"system",
          status:"DELIVERED"as const 
        }))
      )

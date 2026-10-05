@@ -13,7 +13,9 @@ Directory structure:
     │   │   │   ├── schema.prisma
     │   │   │   └── migrations/
     │   │   │       ├── migration_lock.toml
-    │   │   │       └── 20261003045356_init/
+    │   │   │       ├── 20261003045356_init/
+    │   │   │       │   └── migration.sql
+    │   │   │       └── 20261004061425_init/
     │   │   │           └── migration.sql
     │   │   └── src/
     │   │       ├── app.ts
@@ -65,7 +67,9 @@ Directory structure:
     │   │       │   ├── index.ts
     │   │       │   └── logger.ts
     │   │       └── infrastructure/
-    │   │           └── kafka.ts
+    │   │           ├── kafka.ts
+    │   │           ├── notification.store.ts
+    │   │           └── redis.ts
     │   ├── presence-service/
     │   │   ├── package.json
     │   │   ├── tsconfig.json
@@ -153,6 +157,7 @@ Directory structure:
         │       ├── index.ts
         │       └── events/
         │           ├── chat.ts
+        │           ├── notification.ts
         │           └── presence.ts
         ├── shared-kafka/
         │   ├── package.json
@@ -607,6 +612,17 @@ ALTER TABLE "room_members" ADD CONSTRAINT "room_members_roomId_fkey" FOREIGN KEY
 
 -- AddForeignKey
 ALTER TABLE "messages" ADD CONSTRAINT "messages_roomId_fkey" FOREIGN KEY ("roomId") REFERENCES "rooms"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+
+
+================================================
+FILE: apps/chat-service/prisma/migrations/20261004061425_init/migration.sql
+================================================
+-- CreateEnum
+CREATE TYPE "MessageStatus" AS ENUM ('SENT', 'DELIVERED', 'SEEN');
+
+-- AlterTable
+ALTER TABLE "messages" ADD COLUMN     "status" "MessageStatus" NOT NULL DEFAULT 'SENT';
 
 
 
@@ -1293,6 +1309,31 @@ export const listMessages = asyncHandler(async (req: Request, res: Response) => 
   });
 });
 
+export const markMessagesSeen = asyncHandler(async (req: Request, res: Response) => {
+  if (!req.user) {
+    throw new UnauthorizedError("Authentication required");
+  }
+
+  const roomId = req.params.roomId as string;
+  const { messageIds } = req.body;
+
+  await messageService.markAsSeen(roomId, req.user.userId, messageIds);
+
+  res.status(200).json({
+    success: true,
+    message: "Messages marked as seen",
+  });
+});
+
+export const markMessagesDelivered = asyncHandler(async (req, res) => {
+  const roomId = req.params.roomId as string;
+  const { messageIds } = req.body;
+
+  await messageService.markAsDelivered(roomId, messageIds);
+
+  res.status(200).json({ success: true });
+});
+
 
 ================================================
 FILE: apps/chat-service/src/modules/message/message.interface.ts
@@ -1304,8 +1345,25 @@ export interface MessageInterface{
   create(roomId: string, senderId: string, content: string): Promise<MessageView>
   createWithOutbox(messageId:string,roomId:string,senderId:string,content:string,event:ChatMessageCreatedEvent):Promise<MessageView>
   listByRoom(roomId: string, limit: number, beforeMessageId?: string): Promise<PaginatedMessages>
-  prismaRoomTouch(roomId:string):Promise<void>
+  prismaRoomTouch(roomId: string): Promise<void>
+  updateStatus(
+    messageIds: string[],
+    roomId: string,
+    status: "DELIVERED" | "SEEN",
+  ): Promise<string[]>;
+
+  createStatusOutbox(
+    events: Array<{
+      messageId: string;
+      roomId: string;
+      status: "DELIVERED" | "SEEN";
+      userId?: string;
+    }>,
+  ): Promise<void>;
+
+   getMessages(messageIds:string[],roomId:string):Promise<Array<{id:string,senderId:string}>>
 }
+
 
 
 ================================================
@@ -1323,6 +1381,7 @@ const messageSelect = {
   senderId: true,
   content: true,
   createdAt: true,
+  status: true,
 } as const;
 
 export class MessageRepository implements MessageInterface {
@@ -1338,27 +1397,33 @@ export class MessageRepository implements MessageInterface {
   }
 
   /**
-     * Atomic: message + room touch + outbox row
-     */
-  async createWithOutbox(messageId:string,roomId: string, senderId: string, content: string, event: ChatMessageCreatedEvent): Promise<MessageView> {
+   * Atomic: message + room touch + outbox row
+   */
+  async createWithOutbox(
+    messageId: string,
+    roomId: string,
+    senderId: string,
+    content: string,
+    event: ChatMessageCreatedEvent,
+  ): Promise<MessageView> {
     return prisma.$transaction(async (tx) => {
       const message = await tx.message.create({
         data: { id: messageId, roomId, senderId, content },
-        select:messageSelect
-      })
+        select: messageSelect,
+      });
       await tx.room.update({
         where: { id: roomId },
-        data:{updatedAt:new Date()}
-      })
+        data: { updatedAt: new Date() },
+      });
       await tx.outBox.create({
         data: {
           key: roomId,
           topic: TOPICS.CHAT_MESSAGE_CREATED,
-          payload:event as any
-        }
-      })
-      return message
-    })
+          payload: event as any,
+        },
+      });
+      return message;
+    });
   }
   async listByRoom(
     roomId: string,
@@ -1404,7 +1469,57 @@ export class MessageRepository implements MessageInterface {
   async prismaRoomTouch(roomId: string): Promise<void> {
     await prisma.room.update({
       where: { id: roomId },
-      data:{updatedAt:new Date()}
+      data: { updatedAt: new Date() },
+    });
+  }
+
+  async updateStatus(
+    messageIds: string[],
+    roomId: string,
+    status: "DELIVERED" | "SEEN",
+  ): Promise<string[]> {
+    // Only update messages that are still in a lower state
+    await prisma.message.updateMany({
+      where: {
+        id: { in: messageIds },
+        roomId,
+        status: { in: status === "SEEN" ? ["SENT", "DELIVERED"] : ["SENT"] },
+      },
+      data: { status },
+    });
+    return messageIds;
+  }
+  async createStatusOutbox(
+    events: Array<{
+      messageId: string;
+      roomId: string;
+      status: "DELIVERED" | "SEEN";
+      userId: string;
+    }>,
+  ): Promise<void>{
+    await prisma.outBox.createMany({
+      data: events.map((e) => ({
+        key: e.roomId,
+          topic: TOPICS.CHAT_MESSAGE_STATUS,
+        payload: {
+          eventId: crypto.randomUUID(),
+          eventType: "chat.message.status",
+                  occurredAt: new Date().toISOString(),
+                  data: e,
+            }
+      }))
+    })
+  }
+
+  async getMessages(messageIds:string[],roomId:string):Promise<Array<{id:string,senderId:string}>> {
+    return prisma.message.findMany({
+      where: {
+        id: { in: messageIds },roomId
+      },
+        select: {
+          id:true,senderId:true
+        
+      }
     })
   }
 }
@@ -1417,8 +1532,8 @@ FILE: apps/chat-service/src/modules/message/message.route.ts
 import express from "express";
 import { authenticate } from "../../middlewares/auth.middleware.js";
 import { validate } from "../../middlewares/validate.middleware.js";
-import { sendMessageSchema } from "./message.schema.js";
-import { listMessages, sendMessage } from "./message.controller.js";
+import { markDeliveredSchema, markSeenSchema, sendMessageSchema } from "./message.schema.js";
+import { listMessages, markMessagesDelivered, markMessagesSeen, sendMessage } from "./message.controller.js";
 
 const router = express.Router({ mergeParams: true });
 
@@ -1426,6 +1541,8 @@ router.use(authenticate);
 
 router.post("/", validate(sendMessageSchema), sendMessage);
 router.get("/", listMessages);
+router.post("/seen", validate(markSeenSchema), markMessagesSeen);
+router.post("/delivered", validate(markDeliveredSchema),markMessagesDelivered);
 
 export default router;
 
@@ -1447,6 +1564,14 @@ export const listMessagesQuerySchema = z.object({
   before: z.string().uuid().optional(),
 });
 
+export const markSeenSchema = z.object({
+  messageIds: z.array(z.string().uuid()).min(1).max(100),
+});
+
+
+export const markDeliveredSchema = z.object({
+  messageIds: z.array(z.string().uuid()).min(1).max(100),
+})
 export type SendMessageInput = z.infer<typeof sendMessageSchema>;
 export type ListMessagesQuery = z.infer<typeof listMessagesQuerySchema>;
 
@@ -1536,6 +1661,42 @@ export class MessageService {
 
     return this.messageRepo.listByRoom(roomId, limit, before);
   }
+
+  async markAsSeen(roomId: string, userId: string, messageIds: string[]): Promise<void>{
+    const isMember = await this.roomRepo.isMember(roomId, userId);
+    if (!isMember) {
+      throw new ForbiddenError("You are not a member of this room");
+    }
+    if (messageIds.length === 0) return;
+    // Fetch the messages to check sender
+    const messages = await this.messageRepo.getMessages(messageIds,roomId)
+    // Filter out messages the current user sent
+    const allowedIds = messages.filter((m) => m.senderId !== userId).map((m) => m.id)
+    if (allowedIds.length === 0) return;
+    await this.messageRepo.updateStatus(allowedIds, roomId, "SEEN")
+
+    await this.messageRepo.createStatusOutbox(
+      allowedIds.map((messageId) => ({
+            messageId,
+            roomId,
+            status: "SEEN" as const,
+            userId,
+          })),
+    )
+    logger.info("Messages marked as SEEN", { roomId, userId, count: allowedIds.length });
+  }
+
+   async markAsDelivered(roomId: string, messageIds: string[]): Promise<void>{
+    if (messageIds.length === 0) return;
+     await this.messageRepo.updateStatus(messageIds, roomId, "DELIVERED")
+     await this.messageRepo.createStatusOutbox(
+       messageIds.map((messageId) => ({
+         messageId,
+         roomId,
+         status:"DELIVERED"as const 
+       }))
+     )
+  }
 }
 
 
@@ -1548,6 +1709,7 @@ export interface MessageView {
   content: string;
   senderId: string;
   createdAt: Date;
+  status:"SENT"|"DELIVERED"|"SEEN"
 }
 
 
@@ -1634,6 +1796,16 @@ export const addMember = asyncHandler(async (req: Request, res: Response) => {
     success: true,
     message: "Member added successfully",
     data: room,
+  });
+});
+
+export const getRoomMembers = asyncHandler(async (req, res) => {
+  const roomId = req.params.roomId as string;
+  const room = await roomService.getById(roomId, "system"); // or create a special method
+
+  res.json({
+    success: true,
+    data: room.members,
   });
 });
 
@@ -2197,6 +2369,7 @@ const envSchema = z.object({
   NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
   PORT: z.coerce.number().default(4005),
   KAFKA_BROKER: z.string().min(1),
+  REDIS_URL:z.string()
 });
 
 const parsed = envSchema.safeParse(process.env);
@@ -2304,55 +2477,319 @@ export const logger = {
 ================================================
 FILE: apps/notification-service/src/infrastructure/kafka.ts
 ================================================
-import { createKafkaClient, KafkaConsumer, TOPICS } from "@realtime-chat/shared-kafka";
+import {
+  createKafkaClient,
+  KafkaConsumer,
+  KafkaProducer,
+  TOPICS,
+} from "@realtime-chat/shared-kafka";
 import { config } from "../config/index.js";
 import { logger } from "../config/logger.js";
 import { ChatMessageCreatedSchema } from "@realtime-chat/shared-events";
+import { notificationStore } from "./notification.store.js";
+import { randomUUID } from "node:crypto";
 
 const kafka = createKafkaClient({
   clientId: "notification-service",
-  brokers:[config.KAFKA_BROKER]
-})
-export const kafkaConsumer = new KafkaConsumer(kafka, config.KAFKA_GROUP_ID)
+  brokers: [config.KAFKA_BROKER],
+});
+export const kafkaConsumer = new KafkaConsumer(kafka, config.KAFKA_GROUP_ID);
+
+const producer = new KafkaProducer(kafka);
 
 export const startConsumers = async (): Promise<void> => {
   await kafkaConsumer.connect();
-  await kafkaConsumer.subscribe([TOPICS.CHAT_MESSAGE_CREATED])
-  logger.info(
-      "Kafka consumer subscribed",{ topics: [TOPICS.CHAT_MESSAGE_CREATED], groupId: config.KAFKA_GROUP_ID },
-
-    );
-  await kafkaConsumer.run(async ({topic,partition,offset,key,value }) => {
+  await kafkaConsumer.subscribe([TOPICS.CHAT_MESSAGE_CREATED]);
+  logger.info("Kafka consumer subscribed", {
+    topics: [TOPICS.CHAT_MESSAGE_CREATED],
+    groupId: config.KAFKA_GROUP_ID,
+  });
+  await kafkaConsumer.run(async ({ topic, partition, offset, key, value }) => {
     if (topic !== TOPICS.CHAT_MESSAGE_CREATED) return;
 
-        const parsed = ChatMessageCreatedSchema.safeParse(value);
-        if (!parsed.success) {
-          logger.warn(
-            { topic, partition, offset, issues: parsed.error.flatten() },
-            "Invalid chat.message.created payload â€“ skipping",
-          );
-          return; // still commit (poison pill handling for Phase 4)
-        }
+    const parsed = ChatMessageCreatedSchema.safeParse(value);
+    if (!parsed.success) {
+      logger.warn(
+        { topic, partition, offset, issues: parsed.error.flatten() },
+        "Invalid chat.message.created payload â€“ skipping",
+      );
+      return; // still commit (poison pill handling for Phase 4)
+    }
 
-        const event = parsed.data;
+    const event = parsed.data;
 
-        // Phase 4 demo: just log. Later â†’ push / email / in-app notification
-    logger.info(
-        "Received chat.message.created â€“ would notify users here",
-          {
-            eventId: event.eventId,
-            messageId: event.data.messageId,
-            roomId: event.data.roomId,
-            senderId: event.data.senderId,
-            partition,
-            offset,
-            key,
-          }
-
-        );
+    const { roomId, messageId, senderId, content, createdAt } = event.data;
+    // 1. Get room members from chat-service
+    const members = await getRoomMembers(roomId);
+    if (!members) return;
+    // 2. Create a notification for every member except the sender
+    for (const memberId of members) {
+      if (memberId === senderId) continue;
+      const notification = await notificationStore.create({
+        userId: memberId,
+        roomId,
+        messageId,
+        senderId,
+        content,
+        createdAt,
       });
+      // 3. Publish notification.created so the gateway can push it
+      const notifEvent = {
+        eventId: randomUUID(),
+        eventType: "notification.created" as const,
+        occurredAt: new Date().toISOString(),
+        data: {
+          notificationId: notification.id,
+          userId: memberId,
+          roomId,
+          messageId,
+          senderId,
+          content,
+          createdAt,
+        },
+      };
+      await producer.send(TOPICS.NOTIFICATION_CREATED, memberId, notifEvent);
+
+      logger.info("Notification created", {
+        notificationId: notification.id,
+        userId: memberId,
+        roomId,
+        key
+      });
+    }
+  });
+};
+
+// Simple helper â€“ calls chat-service
+async function getRoomMembers(roomId: string): Promise<string[] | null> {
+  try {
+    // We need an internal way to get members.
+    // For now we will add a lightweight endpoint in chat-service.
+    const res = await fetch(
+      `${process.env.CHAT_SERVICE_URL}/rooms/${roomId}/members`,
+      {
+        headers: {
+          "x-internal-service": "notification-service", // simple internal flag
+        },
+      },
+    );
+    if (!res.ok) return null;
+
+    const body = (await res.json()) as {
+      success?: boolean;
+      data?: Array<{ userId: string }>;
+    };
+    
+    return body.data?.map((m) => m.userId) ?? null;
+  } catch (err) {
+    logger.error("Failed to fetch room members", err);
+    return null;
+  }
+}
+
+
+
+================================================
+FILE: apps/notification-service/src/infrastructure/notification.store.ts
+================================================
+import { redis } from "./redis.js";
+import { randomUUID } from "node:crypto";
+
+export interface Notification {
+  id: string;
+  userId: string;
+  roomId: string;
+  messageId: string;
+  senderId: string;
+  content: string;
+  createdAt: string;
+  read: boolean;
+}
+
+const NOTIFICATION_TTL_SECONDS = 60 * 60 * 24 * 30; // 30 days
+
+export class NotificationStore {
+  private key(userId: string) {
+    return `notifications:${userId}`;
+  }
+
+  async create(data: Omit<Notification, "id" | "read">): Promise<Notification> {
+    const notification: Notification = {
+      id: randomUUID(),
+      ...data,
+      read: false,
     };
 
+    const key = this.key(data.userId);
+
+    // Store as a hash + add to a sorted set (for ordering)
+    await redis
+      .multi()
+      .hset(`${key}:${notification.id}`, notification as any)
+      .zadd(key, Date.now(), notification.id)
+      .expire(`${key}:${notification.id}`, NOTIFICATION_TTL_SECONDS)
+      .expire(key, NOTIFICATION_TTL_SECONDS)
+      .exec();
+
+    return notification;
+  }
+
+  async list(userId: string, limit = 50): Promise<Notification[]> {
+    const key = this.key(userId);
+    const ids = await redis.zrevrange(key, 0, limit - 1);
+  
+    if (ids.length === 0) return [];
+  
+    const pipeline = redis.pipeline();
+    ids.forEach((id) => pipeline.hgetall(`${key}:${id}`));
+    const results = await pipeline.exec();
+  
+    const notifications: Notification[] = [];
+  
+    for (const result of results ?? []) {
+      const raw = result?.[1] as Record<string, string> | undefined;
+      if (!raw || !raw.id) continue;
+  
+      notifications.push({
+        id: raw.id,
+        userId: raw.userId ?? userId,
+        roomId: raw.roomId ?? "",
+        messageId: raw.messageId ?? "",
+        senderId: raw.senderId ?? "",
+        content: raw.content ?? "",
+        createdAt: raw.createdAt ?? new Date().toISOString(),
+        read: raw.read === "true",
+      });
+    }
+  
+    return notifications;
+  }
+
+  async markAsRead(userId: string, notificationIds: string[]): Promise<void> {
+    const pipeline = redis.pipeline();
+    for (const id of notificationIds) {
+      pipeline.hset(`notifications:${userId}:${id}`, "read", "true");
+    }
+    await pipeline.exec();
+  }
+}
+
+export const notificationStore = new NotificationStore();
+
+
+================================================
+FILE: apps/notification-service/src/infrastructure/redis.ts
+================================================
+import { Redis } from "ioredis";
+import { config } from "../config/index.js";
+import { logger } from "../config/logger.js";
+
+class RedisClient {
+  private static instance: Redis | null = null;
+  private static connected = false;
+
+  private constructor() {}
+
+  static getInstance(): Redis {
+    if (RedisClient.instance) {
+      return RedisClient.instance;
+    }
+
+    const client = new Redis(config.REDIS_URL, {
+      retryStrategy: (times: number) => {
+        const delay = Math.min(times * 500, 5000);
+
+        logger.warn(
+          { attempt: times, delayMs: delay },
+          "Redis reconnect attempt",
+        );
+
+        return delay;
+      },
+      maxRetriesPerRequest: 3,
+      enableReadyCheck: true,
+    });
+
+    RedisClient.instance = client;
+    RedisClient.setupEventListeners(client);
+
+    return client;
+  }
+
+  private static setupEventListeners(client: Redis): void {
+    client.on("connect", () => {
+      logger.info("Redis TCP connection established");
+    });
+
+    client.on("ready", () => {
+      RedisClient.connected = true;
+      logger.info("Redis client is ready");
+    });
+
+    client.on("error", (error: Error) => {
+      RedisClient.connected = false;
+      logger.error({ err: error }, "Redis connection error");
+    });
+
+    client.on("close", () => {
+      RedisClient.connected = false;
+      logger.warn("Redis connection closed");
+    });
+
+    client.on("reconnecting", () => {
+      RedisClient.connected = false;
+      logger.warn("Reconnecting to Redis");
+    });
+
+    client.on("end", () => {
+      RedisClient.connected = false;
+      logger.warn("Redis connection ended");
+    });
+  }
+
+  static isReady(): boolean {
+    return RedisClient.connected;
+  }
+
+  static async testConnection(): Promise<boolean> {
+    try {
+      const response = await RedisClient.getInstance().ping();
+
+      if (response === "PONG") {
+        logger.info("Redis ping successful");
+        return true;
+      }
+
+      return false;
+    } catch (error) {
+      logger.error({ err: error }, "Redis connection test failed");
+      return false;
+    }
+  }
+
+  static async closeConnection(): Promise<void> {
+    const client = RedisClient.instance;
+
+    if (!client) {
+      return;
+    }
+
+    try {
+      await client.quit();
+      logger.info("Redis connection closed gracefully");
+    } catch (error) {
+      logger.error({ err: error }, "Error closing Redis connection");
+      client.disconnect();
+    } finally {
+      RedisClient.instance = null;
+      RedisClient.connected = false;
+    }
+  }
+}
+
+export const redis = RedisClient.getInstance();
+
+export default RedisClient;
 
 
 ================================================
@@ -4555,6 +4992,62 @@ const startServer = async (): Promise<void> => {
           ack?.({ success: true });
         },
       );
+      
+      socket.on(
+        "message:seen",
+        async (
+          payload: { roomId?: string; messageIds?: string[] },
+          ack?: (res: unknown) => void,
+        ) => {
+          const { roomId, messageIds } = payload ?? {};
+      
+          if (!roomId || !messageIds || messageIds.length === 0) {
+            ack?.({ success: false, error: "roomId and messageIds are required" });
+            return;
+          }
+      
+          const token = socket.handshake.auth?.token as string | undefined;
+          if (!token) {
+            ack?.({ success: false, error: "Missing token" });
+            return;
+          }
+      
+          try {
+            const res = await fetch(
+              `${config.CHAT_SERVICE_URL}/rooms/${roomId}/messages/seen`,
+              {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  Authorization: `Bearer ${token}`,
+                },
+                body: JSON.stringify({ messageIds }),
+              },
+            );
+      
+            if (!res.ok) {
+              let errorMessage = "Failed to mark as seen";
+            
+              try {
+                const body = await res.json();
+                if (body && typeof body === "object" && "message" in body) {
+                  errorMessage = String((body as { message: unknown }).message);
+                }
+              } catch {
+                // ignore JSON parse errors
+              }
+            
+              ack?.({ success: false, error: errorMessage });
+              return;
+            }
+      
+            ack?.({ success: true });
+          } catch (err) {
+            logger.error("message:seen failed", err);
+            ack?.({ success: false, error: "Internal error" });
+          }
+        },
+      );
 
       // ---------- leave-room ----------
       socket.on(
@@ -4765,6 +5258,24 @@ export async function isRoomMember(roomId: string, accessToken: string): Promise
   }
 }
 
+export async function markMessagesDelivered(roomId: string, messageIds: string[], _accessToken: string): Promise<void> {
+  // For simplicity in this phase we call an internal endpoint.
+  try {
+    await fetch(`${config.CHAT_SERVICE_URL}/rooms/${roomId}/messages/delivered`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        // TODO ADD INTERNAL CALL HEADER
+      },
+      body: JSON.stringify({ messageIds })
+    })
+  } catch (err) { 
+    // Non-blocking â€“ delivery status is best-effort
+        console.error("Failed to mark as DELIVERED", err);
+  }
+  
+}
+
 
 ================================================
 FILE: apps/websocket-gateway/src/infrastructure/connection-manager.ts
@@ -4865,7 +5376,11 @@ getRoomsForUser(userId: string): string[]{
     }
   }
   return Array.from(rooms);
-}
+  }
+  
+  getSocketsForUser(userId: string): string[] {
+    return Array.from(this.userToSockets.get(userId) ?? []);
+  }  
 }
   
   export const connectionManager = new ConnectionManager();
@@ -4874,65 +5389,142 @@ getRoomsForUser(userId: string): string[]{
 ================================================
 FILE: apps/websocket-gateway/src/infrastructure/kafka.ts
 ================================================
-import { createKafkaClient, KafkaConsumer, TOPICS } from "@realtime-chat/shared-kafka";
+import {
+  createKafkaClient,
+  KafkaConsumer,
+  TOPICS,
+} from "@realtime-chat/shared-kafka";
+import {
+  ChatMessageCreatedSchema,
+  MessageStatusUpdatedSchema,
+  NotificationCreatedSchema,
+} from "@realtime-chat/shared-events";
+import type { Server } from "socket.io";
 import { config } from "../config/index.js";
-import type{ Server } from "socket.io";
 import { logger } from "../config/logger.js";
-import { ChatMessageCreatedSchema } from "@realtime-chat/shared-events";
+import { markMessagesDelivered } from "./chat-client.js";
+import { connectionManager } from "./connection-manager.js";
 
 const kafka = createKafkaClient({
   clientId: "websocket-gateway",
   brokers: [config.KAFKA_BROKER],
 });
 
-export const kafkaConsumer = new KafkaConsumer(kafka, config.KAFKA_GROUP_ID)
+export const kafkaConsumer = new KafkaConsumer(kafka, config.KAFKA_GROUP_ID);
 
 /**
  * Starts the consumer and wires it to the Socket.IO server.
  * Must be called after `io` is created.
  */
-export const startConsumers = async (io: Server):Promise<void> => {
+export const startConsumers = async (io: Server): Promise<void> => {
   await kafkaConsumer.connect();
-  await kafkaConsumer.subscribe([TOPICS.CHAT_MESSAGE_CREATED]);
+
+  await kafkaConsumer.subscribe([
+    TOPICS.CHAT_MESSAGE_CREATED,
+    TOPICS.CHAT_MESSAGE_STATUS,
+    TOPICS.NOTIFICATION_CREATED
+  ]);
+
   logger.info("[gateway] kafka consumer subscribed", {
-    topics: [TOPICS.CHAT_MESSAGE_CREATED],
-    groupId:config.KAFKA_GROUP_ID
-  })
+    topics: [TOPICS.CHAT_MESSAGE_CREATED, TOPICS.CHAT_MESSAGE_STATUS],
+    groupId: config.KAFKA_GROUP_ID,
+  });
 
   await kafkaConsumer.run(async ({ topic, partition, offset, key, value }) => {
-    if (topic !== TOPICS.CHAT_MESSAGE_CREATED) return
-    const parsed = ChatMessageCreatedSchema.safeParse(value);
-    if (!parsed.success) {
-      logger.warn("[gateway] Invalid chat.message.created payload â€“ skipping", {
-        partition,
-        offset,
-        issues: parsed.error.flatten(),
-      })
-      return; // still commit (poison-pill handling)
-    }
-  
-    const event = parsed.data;
-    const roomId = event.data.roomId
-    // Push to every socket that joined this room
-    io.to(roomId).emit("message:new", {
-      messageId: event.data.messageId,
-      roomId: event.data.roomId,
-            senderId: event.data.senderId,
-            content: event.data.content,
-            createdAt: event.data.createdAt,
-            eventId: event.eventId, // useful for client-side deduplication
-    })
-    logger.info("[gateway] pushed message to room", {
-          roomId,
-          messageId: event.data.messageId,
+    // ---------- New chat message ----------
+    if (topic === TOPICS.CHAT_MESSAGE_CREATED) {
+      const parsed = ChatMessageCreatedSchema.safeParse(value);
+
+      if (!parsed.success) {
+        logger.warn("[gateway] Invalid chat.message.created payload â€“ skipping", {
           partition,
           offset,
-          key,
+          issues: parsed.error.flatten(),
         });
-  })
+        return;
+      }
 
-  
-}
+      const event = parsed.data;
+
+      io.to(event.data.roomId).emit("message:new", {
+        messageId: event.data.messageId,
+        roomId: event.data.roomId,
+        senderId: event.data.senderId,
+        content: event.data.content,
+        createdAt: event.data.createdAt,
+        status: "SENT",
+        eventId: event.eventId,
+      });
+      void markMessagesDelivered(event.data.roomId,[event.data.messageId],"")
+
+      logger.info("[gateway] pushed message to room", {
+        roomId: event.data.roomId,
+        messageId: event.data.messageId,
+        partition,
+        offset,
+        key,
+      });
+
+      return;
+    }
+
+    // ---------- Message status update (DELIVERED / SEEN) ----------
+    if (topic === TOPICS.CHAT_MESSAGE_STATUS) {
+      const parsed = MessageStatusUpdatedSchema.safeParse(value);
+
+      if (!parsed.success) {
+        logger.warn("[gateway] Invalid chat.message.status payload â€“ skipping", {
+          partition,
+          offset,
+          issues: parsed.error.flatten(),
+        });
+        return;
+      }
+
+      const event = parsed.data;
+
+      io.to(event.data.roomId).emit("message:status", {
+        messageId: event.data.messageId,
+        roomId: event.data.roomId,
+        status: event.data.status,
+        userId: event.data.userId,
+        eventId: event.eventId,
+      });
+
+      logger.info("[gateway] pushed message status to room", {
+        roomId: event.data.roomId,
+        messageId: event.data.messageId,
+        status: event.data.status,
+        partition,
+        offset,
+        key,
+      });
+    }
+
+    if (topic === TOPICS.NOTIFICATION_CREATED) {
+      const parsed = NotificationCreatedSchema.safeParse(value);
+      if (!parsed.success) return;
+    
+      const event = parsed.data;
+      const userId = event.data.userId;
+    
+      // Push only to that user's sockets
+      const socketIds = connectionManager.getSocketsForUser?.(userId) 
+        ?? []; // you may need to add this helper
+    
+      for (const socketId of socketIds) {
+        io.to(socketId).emit("notification:new", {
+          id: event.data.notificationId,
+          roomId: event.data.roomId,
+          messageId: event.data.messageId,
+          senderId: event.data.senderId,
+          content: event.data.content,
+          createdAt: event.data.createdAt,
+        });
+      }
+    }
+  });
+};
 
 
 ================================================
@@ -5090,6 +5682,7 @@ FILE: packages/shared-events/src/index.ts
 ================================================
 export * from "./events/chat.js";
 export * from "./events/presence.js";
+export * from "./events/notification.js"
 
 
 ================================================
@@ -5112,17 +5705,43 @@ export const ChatMessageCreatedSchema = z.object({
 
 export const MessageStatusUpdatedSchema = z.object({
   eventId: z.string().uuid(),
-  eventType: z.literal("chat.message.created"),
+  eventType: z.literal("chat.message.status"),
   occurredAt: z.string().datetime(),
   data: z.object({
     messageId: z.string().uuid(),
     roomId: z.string().uuid(),
     status: z.enum(["DELIVERED", "SEEN"]),
-      userId:z.string().uuid()// who marked it
+      userId:z.string().uuid().optional()
   })
 })
 export type ChatMessageCreatedEvent = z.infer<typeof ChatMessageCreatedSchema>;
 export type MessageStatusUpdatedEvent = z.infer<typeof MessageStatusUpdatedSchema>;
+
+
+
+================================================
+FILE: packages/shared-events/src/events/notification.ts
+================================================
+import { z } from "zod";
+
+export const NotificationCreatedSchema = z.object({
+  eventId: z.string().uuid(),
+  eventType: z.literal("notification.created"),
+  occuredAt: z.string().datetime(),
+  data: z.object({
+    notificationId: z.string().uuid(),
+    userId: z.string().uuid(),
+    roomId: z.string().uuid(),
+    senderId: z.string().uuid(),
+    content: z.string(),
+    createdAt: z.string().datetime(),
+    messageId:z.string().uuid()
+  }),
+});
+
+export type NotificationCreatedEvent = z.infer<
+  typeof NotificationCreatedSchema
+>;
 
 
 
@@ -5371,7 +5990,8 @@ export const TOPICS = {
   CHAT_MESSAGE_CREATED: "chat.message.created",
   PRESENCE_USER_ONLINE: "presence.user.online",
   PRESENCE_USER_OFFLINE: "presence.user.offline",
-  CHAT_MESSAGE_STATUS:   "chat_message_status"
+  CHAT_MESSAGE_STATUS: "chat.message.status",
+  NOTIFICATION_CREATED:"notification.created"
 }
 
 export type TopicName=(typeof TOPICS)[keyof typeof TOPICS]

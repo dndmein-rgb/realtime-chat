@@ -6,11 +6,13 @@ import {
 import {
   ChatMessageCreatedSchema,
   MessageStatusUpdatedSchema,
+  NotificationCreatedSchema,
 } from "@realtime-chat/shared-events";
 import type { Server } from "socket.io";
 import { config } from "../config/index.js";
 import { logger } from "../config/logger.js";
 import { markMessagesDelivered } from "./chat-client.js";
+import { connectionManager } from "./connection-manager.js";
 
 const kafka = createKafkaClient({
   clientId: "websocket-gateway",
@@ -29,6 +31,7 @@ export const startConsumers = async (io: Server): Promise<void> => {
   await kafkaConsumer.subscribe([
     TOPICS.CHAT_MESSAGE_CREATED,
     TOPICS.CHAT_MESSAGE_STATUS,
+    TOPICS.NOTIFICATION_CREATED
   ]);
 
   logger.info("[gateway] kafka consumer subscribed", {
@@ -105,6 +108,29 @@ export const startConsumers = async (io: Server): Promise<void> => {
         offset,
         key,
       });
+    }
+
+    if (topic === TOPICS.NOTIFICATION_CREATED) {
+      const parsed = NotificationCreatedSchema.safeParse(value);
+      if (!parsed.success) return;
+    
+      const event = parsed.data;
+      const userId = event.data.userId;
+    
+      // Push only to that user's sockets
+      const socketIds = connectionManager.getSocketsForUser?.(userId) 
+        ?? []; // you may need to add this helper
+    
+      for (const socketId of socketIds) {
+        io.to(socketId).emit("notification:new", {
+          id: event.data.notificationId,
+          roomId: event.data.roomId,
+          messageId: event.data.messageId,
+          senderId: event.data.senderId,
+          content: event.data.content,
+          createdAt: event.data.createdAt,
+        });
+      }
     }
   });
 };

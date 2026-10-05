@@ -94,7 +94,11 @@ getRoomsForUser(userId: string): string[]{
     }
   }
   return Array.from(rooms);
-}
+  }
+  
+  getSocketsForUser(userId: string): string[] {
+    return Array.from(this.userToSockets.get(userId) ?? []);
+  }  
 }
   
   export const connectionManager = new ConnectionManager();

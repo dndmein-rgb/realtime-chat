@@ -21,7 +21,7 @@ export const MessageStatusUpdatedSchema = z.object({
     messageId: z.string().uuid(),
     roomId: z.string().uuid(),
     status: z.enum(["DELIVERED", "SEEN"]),
-      userId:z.string().uuid()// who marked it
+      userId:z.string().uuid().optional()
   })
 })
 export type ChatMessageCreatedEvent = z.infer<typeof ChatMessageCreatedSchema>;

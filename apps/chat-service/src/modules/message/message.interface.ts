@@ -17,7 +17,7 @@ export interface MessageInterface{
       messageId: string;
       roomId: string;
       status: "DELIVERED" | "SEEN";
-      userId: string;
+      userId?: string;
     }>,
   ): Promise<void>;
 

@@ -63,3 +63,13 @@ export const addMember = asyncHandler(async (req: Request, res: Response) => {
     data: room,
   });
 });
+
+export const getRoomMembers = asyncHandler(async (req, res) => {
+  const roomId = req.params.roomId as string;
+  const room = await roomService.getById(roomId, "system"); // or create a special method
+
+  res.json({
+    success: true,
+    data: room.members,
+  });
+});

@@ -5,6 +5,7 @@ const envSchema = z.object({
   NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
   PORT: z.coerce.number().default(4005),
   KAFKA_BROKER: z.string().min(1),
+  REDIS_URL:z.string()
 });
 
 const parsed = envSchema.safeParse(process.env);

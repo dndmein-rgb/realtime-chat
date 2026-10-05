@@ -129,7 +129,7 @@ export class MessageRepository implements MessageInterface {
     await prisma.outBox.createMany({
       data: events.map((e) => ({
         key: e.roomId,
-          topic: "chat.message.status",
+          topic: TOPICS.CHAT_MESSAGE_STATUS,
         payload: {
           eventId: crypto.randomUUID(),
           eventType: "chat.message.status",
