@@ -99,4 +99,10 @@ export class RoomService {
         throw new ForbiddenError("You are not a member of this room");
       }
     }
+  
+  async getByIdForInternal(roomId: string): Promise<RoomView>{
+    const room = await this.roomRepo.findById(roomId)
+    if (!room) throw new NotFoundError("Room not found");
+      return room;
+  }
   }

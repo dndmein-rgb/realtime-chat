@@ -1,4 +1,4 @@
-import { TopicName } from "@realtime-chat/shared-kafka";
+import { TopicName, TOPICS } from "@realtime-chat/shared-kafka";
 import { logger } from "../config/logger.js";
 import { kafkaProducer } from "./kafka.js";
 import { prisma } from "./prisma.js";
@@ -13,6 +13,10 @@ const RETENTION_HOURS = 24;
 // How often to run cleanup.
 const CLEANUP_INTERVAL_MS = 10 * 60 * 1_000;
 
+// DLQ topic – must also be allowed by the KafkaProducer TopicName type
+// or cast as any / extend TOPICS if you want type safety.
+const DLQ_TOPIC = TOPICS.CHAT_OUTBOX_DLQ;
+
 export class OutBoxPublisher {
   private timer: NodeJS.Timeout | null = null;
   private cleanupTimer: NodeJS.Timeout | null = null;
@@ -23,19 +27,13 @@ export class OutBoxPublisher {
 
     logger.info("Outbox publisher started");
 
-    // Main publishing loop.
-    this.timer = setInterval(
-      () => void this.tick(),
-      POLL_INTERVAL_MS,
-    );
+    this.timer = setInterval(() => void this.tick(), POLL_INTERVAL_MS);
 
-    // Periodic cleanup of old published rows.
     this.cleanupTimer = setInterval(
       () => void this.cleanup(),
       CLEANUP_INTERVAL_MS,
     );
 
-    // Run cleanup once immediately on startup.
     void this.cleanup();
   }
 
@@ -56,9 +54,8 @@ export class OutBoxPublisher {
   private async tick(): Promise<void> {
     if (this.running) return;
     this.running = true;
-  
+
     try {
-      // 1. Atomically claim a batch of rows
       const rows = await prisma.$queryRaw<
         Array<{
           id: string;
@@ -76,8 +73,7 @@ export class OutBoxPublisher {
         LIMIT ${BATCH_SIZE}
         FOR UPDATE SKIP LOCKED
       `;
-  
-      // 2. Publish each claimed row
+
       for (const row of rows) {
         try {
           await kafkaProducer.send(
@@ -85,12 +81,13 @@ export class OutBoxPublisher {
             row.key ?? row.id,
             row.payload as object,
           );
-  
+
+          // SUCCESS → only mark as published. Never touch DLQ here.
           await prisma.outBox.update({
             where: { id: row.id },
             data: { publishedAt: new Date() },
           });
-  
+
           logger.debug("Outbox published", {
             outboxId: row.id,
             topic: row.topic,
@@ -98,13 +95,40 @@ export class OutBoxPublisher {
           });
         } catch (err) {
           const newAttempts = row.attempts + 1;
-  
+
           await prisma.outBox.update({
             where: { id: row.id },
             data: { attempts: newAttempts },
           });
-  
+
           if (newAttempts >= MAX_ATTEMPTS) {
+            // ONLY send to DLQ when we give up
+            try {
+              await kafkaProducer.send(DLQ_TOPIC, row.key ?? row.id, {
+                original: {
+                  id: row.id,
+                  topic: row.topic,
+                  key: row.key,
+                  payload: row.payload,
+                  attempts: newAttempts,
+                },
+                reason: "max_attempts",
+                failedAt: new Date().toISOString(),
+              });
+            } catch (dlqErr) {
+              logger.error("Failed to publish to DLQ", {
+                outboxId: row.id,
+                err: dlqErr,
+              });
+            }
+
+            // Mark as published so the poller stops picking it up
+            // (or move to a dead_letter table if you prefer)
+            await prisma.outBox.update({
+              where: { id: row.id },
+              data: { publishedAt: new Date() },
+            });
+
             logger.error("Outbox row moved to dead-letter", {
               outboxId: row.id,
               topic: row.topic,
@@ -128,6 +152,7 @@ export class OutBoxPublisher {
       this.running = false;
     }
   }
+
   private async cleanup(): Promise<void> {
     try {
       const cutOff = new Date(

@@ -5,22 +5,24 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/server.ts",
-      "build": "tsc",
-      "start": "node dist/server.js"
+    "build": "tsc",
+    "start": "node dist/server.js"
   },
   "dependencies": {
-    "@realtime-chat/shared-types": "*",
-    "@realtime-chat/shared-utils": "*",
     "@realtime-chat/shared-events": "*",
     "@realtime-chat/shared-kafka": "*",
+    "@realtime-chat/shared-types": "*",
+    "@realtime-chat/shared-utils": "*",
+    "@socket.io/redis-adapter": "^8.3.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "express": "^4.21.0",
     "helmet": "^7.1.0",
+    "ioredis": "^6.0.0",
     "jsonwebtoken": "^9.0.3",
+    "pino": "^10.3.1",
     "socket.io": "^4.8.1",
-    "zod": "^3.23.8",
-    "pino": "^10.3.1"
+    "zod": "^3.23.8"
   },
   "devDependencies": {
     "@types/cors": "^2.8.17",

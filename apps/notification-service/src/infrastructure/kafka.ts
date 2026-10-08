@@ -87,14 +87,17 @@ async function getRoomMembers(roomId: string): Promise<string[] | null> {
     // We need an internal way to get members.
     // For now we will add a lightweight endpoint in chat-service.
     const res = await fetch(
-      `${process.env.CHAT_SERVICE_URL}/rooms/${roomId}/members`,
+      `${process.env.CHAT_SERVICE_URL}/rooms/internal/${roomId}/members`,
       {
         headers: {
-          "x-internal-service": "notification-service", // simple internal flag
+          "x-internal-service": config.INTERNAL_SERVICE_KEY
         },
       },
     );
-    if (!res.ok) return null;
+    if (!res.ok) {
+          logger.warn({ status: res.status, roomId }, "Failed to fetch room members");
+          return null;
+        }
 
     const body = (await res.json()) as {
       success?: boolean;

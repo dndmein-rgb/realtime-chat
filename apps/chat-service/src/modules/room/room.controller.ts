@@ -65,8 +65,13 @@ export const addMember = asyncHandler(async (req: Request, res: Response) => {
 });
 
 export const getRoomMembers = asyncHandler(async (req, res) => {
+  // Internal-only: either x-internal-service header or a valid JWT
+    const isInternal = req.headers["x-internal-service"] === "notification-service";
+    if (!isInternal && !req.user) {
+      throw new UnauthorizedError("Authentication required");
+    }
   const roomId = req.params.roomId as string;
-  const room = await roomService.getById(roomId, "system"); // or create a special method
+  const room = await roomService.getByIdForInternal(roomId)
 
   res.json({
     success: true,

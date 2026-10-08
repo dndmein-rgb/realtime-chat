@@ -11,8 +11,10 @@ const envSchema = z.object({
       .string()
       .min(1)
       .transform((value) => value.split(",").map((origin) => origin.trim())),
+  INTERNAL_SERVICE_KEY: z.string().min(32),
+  REDIS_URL:z.string().url()
 
-  });
+});
 
 const parsed = envSchema.safeParse(process.env);
 

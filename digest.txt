@@ -29,8 +29,11 @@ Directory structure:
     │   │       │   └── prisma.ts
     │   │       ├── middlewares/
     │   │       │   ├── auth.middleware.ts
+    │   │       │   ├── correlation.middleware.ts
     │   │       │   ├── cors.middleware.ts
     │   │       │   ├── error.middleware.ts
+    │   │       │   ├── internal-auth.middleware.ts
+    │   │       │   ├── rate-limit.ts
     │   │       │   ├── req.middleware.ts
     │   │       │   └── validate.middleware.ts
     │   │       ├── modules/
@@ -66,10 +69,19 @@ Directory structure:
     │   │       ├── config/
     │   │       │   ├── index.ts
     │   │       │   └── logger.ts
-    │   │       └── infrastructure/
-    │   │           ├── kafka.ts
-    │   │           ├── notification.store.ts
-    │   │           └── redis.ts
+    │   │       ├── infrastructure/
+    │   │       │   ├── kafka.ts
+    │   │       │   ├── notification.store.ts
+    │   │       │   └── redis.ts
+    │   │       ├── middlewares/
+    │   │       │   ├── auth.middleware.ts
+    │   │       │   ├── correlation.middleware.ts
+    │   │       │   └── error.middleware.ts
+    │   │       ├── modules/
+    │   │       │   └── notification/
+    │   │       │       └── notification.route.ts
+    │   │       └── types/
+    │   │           └── express.d.ts
     │   ├── presence-service/
     │   │   ├── package.json
     │   │   ├── tsconfig.json
@@ -82,7 +94,6 @@ Directory structure:
     │   │       │   └── logger.ts
     │   │       └── infrastructure/
     │   │           ├── kafka.ts
-    │   │           ├── presence-publisher.ts
     │   │           ├── presence.store.ts
     │   │           └── redis.ts
     │   ├── user-service/
@@ -112,8 +123,10 @@ Directory structure:
     │   │       │       └── refresh-token.store.ts
     │   │       ├── middlewares/
     │   │       │   ├── auth.middleware.ts
+    │   │       │   ├── correlation.middleware.ts
     │   │       │   ├── cors.middleware.ts
     │   │       │   ├── error.middleware.ts
+    │   │       │   ├── rate-limit.ts
     │   │       │   ├── req.middleware.ts
     │   │       │   └── validate.middleware.ts
     │   │       ├── modules/
@@ -130,6 +143,31 @@ Directory structure:
     │   │       │       └── auth.utils.ts
     │   │       └── types/
     │   │           └── express.d.ts
+    │   ├── web/
+    │   │   ├── index.html
+    │   │   ├── package.json
+    │   │   ├── tsconfig.app.json
+    │   │   ├── tsconfig.json
+    │   │   ├── tsconfig.node.json
+    │   │   ├── vite.config.ts
+    │   │   ├── .env.example
+    │   │   └── src/
+    │   │       ├── App.tsx
+    │   │       ├── main.tsx
+    │   │       ├── styles.css
+    │   │       ├── vite-env.d.ts
+    │   │       ├── api/
+    │   │       │   ├── client.ts
+    │   │       │   └── socket.ts
+    │   │       ├── hooks/
+    │   │       │   └── useChat.ts
+    │   │       ├── pages/
+    │   │       │   ├── AuthPage.tsx
+    │   │       │   └── ChatPage.tsx
+    │   │       ├── store/
+    │   │       │   └── auth.tsx
+    │   │       └── types/
+    │   │           └── index.ts
     │   └── websocket-gateway/
     │       ├── package.json
     │       ├── tsconfig.json
@@ -146,6 +184,7 @@ Directory structure:
     │           │   ├── kafka.ts
     │           │   └── presence-publisher.ts
     │           ├── middlewares/
+    │           │   ├── correlation.middleware.ts
     │           │   └── socket-auth.ts
     │           └── utils/
     │               └── token.ts
@@ -377,17 +416,20 @@ FILE: apps/chat-service/package.json
     "@prisma/adapter-pg": "^7.10.0",
     "@prisma/client": "^7.10.0",
     "@realtime-chat/shared-events": "*",
+    "@realtime-chat/shared-kafka": "*",
     "@realtime-chat/shared-types": "*",
     "@realtime-chat/shared-utils": "*",
-    "@realtime-chat/shared-kafka": "*",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "express": "^4.21.0",
+    "express-rate-limit": "^8.7.1",
     "helmet": "^7.1.0",
+    "ioredis": "^6.0.0",
     "jsonwebtoken": "^9.0.3",
     "pg": "^8.23.0",
     "pino": "^10.3.1",
+    "rate-limit-redis": "^6.0.1",
     "zod": "^3.23.8"
   },
   "devDependencies": {
@@ -402,6 +444,7 @@ FILE: apps/chat-service/package.json
     "typescript": "^5.6.0"
   }
 }
+
 
 
 ================================================
@@ -444,6 +487,9 @@ DATABASE_URL=postgresql://realtime:realtimepass@localhost:5434/realtime
 KAFKA_BROKER=localhost:9095
 JWT_ACCESS_SECRET=key
 CLIENT_ORIGINS=http://localhost:3000
+INTERNAL_SERVICE_KEY=change_me_to_a_long_random_string_at_least_32_chars
+REDIS_URL=redis://:realtimepass@localhost:6380
+
 
 
 ================================================
@@ -641,9 +687,13 @@ import { requestLogger } from "./middlewares/req.middleware.js";
 
 import roomsRoutes from "./modules/room/room.route.js";
 import messagesRoutes from "./modules/message/message.route.js";
+import { correlationId } from "./middlewares/correlation.middleware.js";
+import { prisma } from "./infrastructure/prisma.js";
+import { globalRateLimiter } from "./middlewares/rate-limit.js";
 
 const app = express();
 
+app.use(correlationId);
 app.use(corsMiddleware);
 app.use(
   helmet({
@@ -652,6 +702,7 @@ app.use(
   }),
 );
 app.use(requestLogger);
+app.use(globalRateLimiter)
 app.use(express.json());
 app.use(cookieParser());
 
@@ -663,6 +714,18 @@ app.get("/health", (_req:Request, res:Response) => {
   });
 });
 
+app.get("/ready", async (_req, res) => {
+  try {
+    await prisma.$queryRaw`SELECT 1`;
+    res.status(200).json({ ready: true, checks: { postgres: "ok" } });
+  } catch (err) {
+    res.status(503).json({
+      ready: false,
+      checks: { postgres: "fail" },
+      error: err instanceof Error ? err.message : "unknown",
+    });
+  }
+});
 app.use("/rooms", roomsRoutes);
 app.use("/rooms/:roomId/messages", messagesRoutes);
 
@@ -766,8 +829,10 @@ const envSchema = z.object({
       .string()
       .min(1)
       .transform((value) => value.split(",").map((origin) => origin.trim())),
+  INTERNAL_SERVICE_KEY: z.string().min(32),
+  REDIS_URL:z.string().url()
 
-  });
+});
 
 const parsed = envSchema.safeParse(process.env);
 
@@ -888,7 +953,7 @@ export const kafkaProducer=new KafkaProducer(kafka)
 ================================================
 FILE: apps/chat-service/src/infrastructure/outbox-publisher.ts
 ================================================
-import { TopicName } from "@realtime-chat/shared-kafka";
+import { TopicName, TOPICS } from "@realtime-chat/shared-kafka";
 import { logger } from "../config/logger.js";
 import { kafkaProducer } from "./kafka.js";
 import { prisma } from "./prisma.js";
@@ -903,6 +968,10 @@ const RETENTION_HOURS = 24;
 // How often to run cleanup.
 const CLEANUP_INTERVAL_MS = 10 * 60 * 1_000;
 
+// DLQ topic â€“ must also be allowed by the KafkaProducer TopicName type
+// or cast as any / extend TOPICS if you want type safety.
+const DLQ_TOPIC = TOPICS.CHAT_OUTBOX_DLQ;
+
 export class OutBoxPublisher {
   private timer: NodeJS.Timeout | null = null;
   private cleanupTimer: NodeJS.Timeout | null = null;
@@ -913,19 +982,13 @@ export class OutBoxPublisher {
 
     logger.info("Outbox publisher started");
 
-    // Main publishing loop.
-    this.timer = setInterval(
-      () => void this.tick(),
-      POLL_INTERVAL_MS,
-    );
+    this.timer = setInterval(() => void this.tick(), POLL_INTERVAL_MS);
 
-    // Periodic cleanup of old published rows.
     this.cleanupTimer = setInterval(
       () => void this.cleanup(),
       CLEANUP_INTERVAL_MS,
     );
 
-    // Run cleanup once immediately on startup.
     void this.cleanup();
   }
 
@@ -946,9 +1009,8 @@ export class OutBoxPublisher {
   private async tick(): Promise<void> {
     if (this.running) return;
     this.running = true;
-  
+
     try {
-      // 1. Atomically claim a batch of rows
       const rows = await prisma.$queryRaw<
         Array<{
           id: string;
@@ -966,8 +1028,7 @@ export class OutBoxPublisher {
         LIMIT ${BATCH_SIZE}
         FOR UPDATE SKIP LOCKED
       `;
-  
-      // 2. Publish each claimed row
+
       for (const row of rows) {
         try {
           await kafkaProducer.send(
@@ -975,12 +1036,13 @@ export class OutBoxPublisher {
             row.key ?? row.id,
             row.payload as object,
           );
-  
+
+          // SUCCESS â†’ only mark as published. Never touch DLQ here.
           await prisma.outBox.update({
             where: { id: row.id },
             data: { publishedAt: new Date() },
           });
-  
+
           logger.debug("Outbox published", {
             outboxId: row.id,
             topic: row.topic,
@@ -988,13 +1050,40 @@ export class OutBoxPublisher {
           });
         } catch (err) {
           const newAttempts = row.attempts + 1;
-  
+
           await prisma.outBox.update({
             where: { id: row.id },
             data: { attempts: newAttempts },
           });
-  
+
           if (newAttempts >= MAX_ATTEMPTS) {
+            // ONLY send to DLQ when we give up
+            try {
+              await kafkaProducer.send(DLQ_TOPIC, row.key ?? row.id, {
+                original: {
+                  id: row.id,
+                  topic: row.topic,
+                  key: row.key,
+                  payload: row.payload,
+                  attempts: newAttempts,
+                },
+                reason: "max_attempts",
+                failedAt: new Date().toISOString(),
+              });
+            } catch (dlqErr) {
+              logger.error("Failed to publish to DLQ", {
+                outboxId: row.id,
+                err: dlqErr,
+              });
+            }
+
+            // Mark as published so the poller stops picking it up
+            // (or move to a dead_letter table if you prefer)
+            await prisma.outBox.update({
+              where: { id: row.id },
+              data: { publishedAt: new Date() },
+            });
+
             logger.error("Outbox row moved to dead-letter", {
               outboxId: row.id,
               topic: row.topic,
@@ -1018,6 +1107,7 @@ export class OutBoxPublisher {
       this.running = false;
     }
   }
+
   private async cleanup(): Promise<void> {
     try {
       const cutOff = new Date(
@@ -1140,6 +1230,21 @@ export const authenticate = (
 
 
 ================================================
+FILE: apps/chat-service/src/middlewares/correlation.middleware.ts
+================================================
+import { randomUUID } from "node:crypto";
+import type { RequestHandler } from "express";
+
+export const correlationId: RequestHandler = (req, res, next) => {
+  const id =
+    (req.headers["x-correlation-id"] as string | undefined) || randomUUID();
+  req.headers["x-correlation-id"] = id;
+  res.setHeader("x-correlation-id", id);
+  next();
+};
+
+
+================================================
 FILE: apps/chat-service/src/middlewares/cors.middleware.ts
 ================================================
 import cors from "cors";
@@ -1202,6 +1307,105 @@ export const errorHandler = (err:Error,_req:Request,res:Response,_next:NextFunct
           : "Internal Server Error",
     });
 }
+
+
+================================================
+FILE: apps/chat-service/src/middlewares/internal-auth.middleware.ts
+================================================
+import type { NextFunction, Request, Response } from "express";
+import { ForbiddenError } from "@realtime-chat/shared-utils";
+import { config } from "../config/index.js";
+
+/**
+ * Only allows requests that carry the shared internal service key.
+ * Used for inter-service calls (notification â†’ chat, gateway â†’ chat, etc.)
+ */
+export const internalAuth = (
+  req: Request,
+  _res: Response,
+  next: NextFunction,
+): void => {
+  const serviceKey = req.headers["x-internal-service-key"];
+
+  if (!serviceKey || serviceKey !== config.INTERNAL_SERVICE_KEY) {
+    return next(new ForbiddenError("Invalid or missing internal service key"));
+  }
+
+  next();
+};
+
+
+================================================
+FILE: apps/chat-service/src/middlewares/rate-limit.ts
+================================================
+import rateLimit from "express-rate-limit";
+import RedisStore, { type RedisReply } from "rate-limit-redis";
+import { Redis } from "ioredis";
+import { config } from "../config/index.js";
+
+// Minimal Redis client for rate limiting only
+const redis = new Redis(config.REDIS_URL, {
+  maxRetriesPerRequest: 3,
+  enableReadyCheck: true,
+});
+
+interface RateLimiterOptions {
+  windowMs: number;
+  limit: number;
+  prefix: string;
+  error: { message: string; code: string };
+}
+
+export const createRateLimiter = ({
+  windowMs,
+  limit,
+  prefix,
+  error,
+}: RateLimiterOptions) => {
+  return rateLimit({
+    windowMs,
+    limit,
+    standardHeaders: "draft-8",
+    legacyHeaders: false,
+    store: new RedisStore({
+      sendCommand: async (...args: string[]) => {
+        const [command, ...commandArgs] = args;
+        if (!command) {
+              throw new Error("Redis command is required");
+            }
+        return redis.call(command, ...commandArgs) as Promise<RedisReply>;
+      },
+      prefix: `rate-limit:${prefix}:`,
+    }),
+    handler: (_req, res) => {
+      res.status(429).json({
+        success: false,
+        error: error.code,
+        message: error.message,
+      });
+    },
+  });
+};
+
+export const globalRateLimiter = createRateLimiter({
+  windowMs: 15 * 60 * 1000,
+  limit: 500,
+  prefix: "chat-global",
+  error: {
+    code: "GLOBAL_RATE_LIMIT_EXCEEDED",
+    message: "Too many requests. Please try again later.",
+  },
+});
+
+export const sendMessageRateLimiter = createRateLimiter({
+  windowMs: 60 * 1000,
+  limit: 30, // 30 messages / minute / IP
+  prefix: "send-message",
+  error: {
+    code: "MESSAGE_RATE_LIMIT_EXCEEDED",
+    message: "Too many messages. Please slow down.",
+  },
+});
 
 
 ================================================
@@ -1534,12 +1738,21 @@ import { authenticate } from "../../middlewares/auth.middleware.js";
 import { validate } from "../../middlewares/validate.middleware.js";
 import { markDeliveredSchema, markSeenSchema, sendMessageSchema } from "./message.schema.js";
 import { listMessages, markMessagesDelivered, markMessagesSeen, sendMessage } from "./message.controller.js";
+import { internalAuth } from "../../middlewares/internal-auth.middleware.js";
+import { sendMessageRateLimiter } from "../../middlewares/rate-limit.js";
 
 const router = express.Router({ mergeParams: true });
 
+// Internal delivered endpoint (gateway uses this)
+router.post(
+  "/delivered",
+  internalAuth,
+  validate(markDeliveredSchema),
+  markMessagesDelivered,
+);
 router.use(authenticate);
 
-router.post("/", validate(sendMessageSchema), sendMessage);
+router.post("/", sendMessageRateLimiter,validate(sendMessageSchema), sendMessage);
 router.get("/", listMessages);
 router.post("/seen", validate(markSeenSchema), markMessagesSeen);
 router.post("/delivered", validate(markDeliveredSchema),markMessagesDelivered);
@@ -1800,8 +2013,13 @@ export const addMember = asyncHandler(async (req: Request, res: Response) => {
 });
 
 export const getRoomMembers = asyncHandler(async (req, res) => {
+  // Internal-only: either x-internal-service header or a valid JWT
+    const isInternal = req.headers["x-internal-service"] === "notification-service";
+    if (!isInternal && !req.user) {
+      throw new UnauthorizedError("Authentication required");
+    }
   const roomId = req.params.roomId as string;
-  const room = await roomService.getById(roomId, "system"); // or create a special method
+  const room = await roomService.getByIdForInternal(roomId)
 
   res.json({
     success: true,
@@ -1979,16 +2197,24 @@ import {
   createRoom,
   getMyRooms,
   getRoomById,
+  getRoomMembers,
 } from "./room.controller.js";
+import { internalAuth } from "../../middlewares/internal-auth.middleware.js";
 
 const router = express.Router();
 
+router.use(authenticate);
+// ---------- Internal (no JWT, service key only) ----------
+router.get("/internal/:roomId/members", internalAuth, getRoomMembers); 
+
+// ---------- Client-facing (JWT) ----------
 router.use(authenticate);
 
 router.post("/", validate(createRoomSchema), createRoom);
 router.get("/", getMyRooms);
 router.get("/:roomId", getRoomById);
 router.post("/:roomId/members", validate(addMemberSchema), addMember);
+router.get("/:roomId/members", getRoomMembers);          
 
 export default router;
 
@@ -2120,6 +2346,12 @@ export class RoomService {
         throw new ForbiddenError("You are not a member of this room");
       }
     }
+  
+  async getByIdForInternal(roomId: string): Promise<RoomView>{
+    const room = await this.roomRepo.findById(roomId)
+    if (!room) throw new NotFoundError("Room not found");
+      return room;
+  }
   }
 
 
@@ -2216,10 +2448,12 @@ FILE: apps/notification-service/package.json
     "@realtime-chat/shared-kafka": "*",
     "@realtime-chat/shared-types": "*",
     "@realtime-chat/shared-utils": "*",
+    "@types/jsonwebtoken": "^9.0.10",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "express": "^4.21.0",
     "helmet": "^7.1.0",
+    "jsonwebtoken": "^9.0.3",
     "pino": "^10.3.1",
     "zod": "^3.23.8"
   },
@@ -2232,6 +2466,7 @@ FILE: apps/notification-service/package.json
     "typescript": "^5.6.0"
   }
 }
+
 
 
 ================================================
@@ -2254,6 +2489,11 @@ FILE: apps/notification-service/.env.example
 NODE_ENV=development
 PORT=4005
 KAFKA_BROKER=localhost:9095
+REDIS_URL=redis://:realtimepass@localhost:6380
+CHAT_SERVICE_URL=http://localhost:4002
+JWT_ACCESS_SECRET=change_me_to_a_long_random_string_at_least_32_chars
+CLIENT_ORIGINS=http://localhost:3000
+INTERNAL_SERVICE_KEY=change_me_to_a_long_random_string_at_least_32_chars
 
 
 ================================================
@@ -2263,13 +2503,23 @@ import express from "express";
 import helmet from "helmet";
 import cors from "cors";
 import type { Request, Response } from "express";
+
 import { config } from "./config/index.js";
+import { redis } from "./infrastructure/redis.js";
+
+
+import notificationRouter from "./modules/notification/notification.route.js"
+
+import { errorHandler } from "./middlewares/error.middleware.js";
+import { correlationId } from "./middlewares/correlation.middleware.js";
 
 const app = express();
 
+app.use(correlationId);
 app.use(helmet());
 app.use(cors());
 app.use(express.json());
+app.use("/notifications",notificationRouter)
 
 app.get("/health", (_req: Request, res: Response) => {
   res.status(200).json({
@@ -2278,6 +2528,23 @@ app.get("/health", (_req: Request, res: Response) => {
     timestamp: new Date().toISOString(),
   });
 });
+
+
+
+app.get("/ready", async (_req, res) => {
+  try {
+    const pong = await redis.ping();
+    if (pong !== "PONG") throw new Error("Redis ping failed");
+    res.status(200).json({ ready: true, checks: { redis: "ok" } });
+  } catch (err) {
+    res.status(503).json({
+      ready: false,
+      checks: { redis: "fail" },
+      error: err instanceof Error ? err.message : "unknown",
+    });
+  }
+});
+app.use(errorHandler);
 
 export default app;
 
@@ -2369,7 +2636,14 @@ const envSchema = z.object({
   NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
   PORT: z.coerce.number().default(4005),
   KAFKA_BROKER: z.string().min(1),
-  REDIS_URL:z.string()
+  REDIS_URL: z.string().min(1),
+  CHAT_SERVICE_URL: z.string().url(),
+  JWT_ACCESS_SECRET: z.string().min(32),
+  CLIENT_ORIGINS: z
+    .string()
+    .min(1)
+    .transform((v) => v.split(",").map((o) => o.trim())),
+  INTERNAL_SERVICE_KEY:z.string().url()
 });
 
 const parsed = envSchema.safeParse(process.env);
@@ -2566,14 +2840,17 @@ async function getRoomMembers(roomId: string): Promise<string[] | null> {
     // We need an internal way to get members.
     // For now we will add a lightweight endpoint in chat-service.
     const res = await fetch(
-      `${process.env.CHAT_SERVICE_URL}/rooms/${roomId}/members`,
+      `${process.env.CHAT_SERVICE_URL}/rooms/internal/${roomId}/members`,
       {
         headers: {
-          "x-internal-service": "notification-service", // simple internal flag
+          "x-internal-service": config.INTERNAL_SERVICE_KEY
         },
       },
     );
-    if (!res.ok) return null;
+    if (!res.ok) {
+          logger.warn({ status: res.status, roomId }, "Failed to fetch room members");
+          return null;
+        }
 
     const body = (await res.json()) as {
       success?: boolean;
@@ -2607,10 +2884,13 @@ export interface Notification {
 }
 
 const NOTIFICATION_TTL_SECONDS = 60 * 60 * 24 * 30; // 30 days
-
+const UNREAD_KEY = (userId: string) => `notifications:unread:${userId}`;
 export class NotificationStore {
-  private key(userId: string) {
-    return `notifications:${userId}`;
+  private listKey(userId: string) {
+    return `notifications:${userId}`
+  }
+  private itemKey(userId: string,id:string) {
+    return `notifications:${userId}:${id}`;
   }
 
   async create(data: Omit<Notification, "id" | "read">): Promise<Notification> {
@@ -2620,28 +2900,30 @@ export class NotificationStore {
       read: false,
     };
 
-    const key = this.key(data.userId);
+    const listKey = this.listKey(data.userId)
+    const itemKey = this.itemKey(data.userId, notification.id)
+    
 
     // Store as a hash + add to a sorted set (for ordering)
     await redis
       .multi()
-      .hset(`${key}:${notification.id}`, notification as any)
-      .zadd(key, Date.now(), notification.id)
-      .expire(`${key}:${notification.id}`, NOTIFICATION_TTL_SECONDS)
-      .expire(key, NOTIFICATION_TTL_SECONDS)
+      .hset(itemKey, notification as any)
+      .zadd(listKey, Date.now(), notification.id)
+      .expire(itemKey, NOTIFICATION_TTL_SECONDS)
+      .expire(UNREAD_KEY(data.userId), NOTIFICATION_TTL_SECONDS)
       .exec();
 
     return notification;
   }
 
-  async list(userId: string, limit = 50): Promise<Notification[]> {
-    const key = this.key(userId);
-    const ids = await redis.zrevrange(key, 0, limit - 1);
+  async list(userId: string, limit = 50, offset = 0): Promise<Notification[]> {
+    const listKey = this.listKey(userId);
+    const ids = await redis.zrevrange(listKey, offset,offset+limit-1);
   
     if (ids.length === 0) return [];
   
     const pipeline = redis.pipeline();
-    ids.forEach((id) => pipeline.hgetall(`${key}:${id}`));
+    ids.forEach((id) => pipeline.hgetall(this.itemKey(userId,id)));
     const results = await pipeline.exec();
   
     const notifications: Notification[] = [];
@@ -2665,13 +2947,45 @@ export class NotificationStore {
     return notifications;
   }
 
-  async markAsRead(userId: string, notificationIds: string[]): Promise<void> {
-    const pipeline = redis.pipeline();
-    for (const id of notificationIds) {
-      pipeline.hset(`notifications:${userId}:${id}`, "read", "true");
-    }
-    await pipeline.exec();
+  async unreadCount(userId: string): Promise<number>{
+    const val = await redis.get(UNREAD_KEY(userId))
+    return val ? parseInt(val, 10) : 0;
   }
+
+  async markAsRead(userId: string, notificationIds: string[]): Promise<void> {
+    if (notificationIds.length === 0) return;
+    const pipeline = redis.pipeline();
+    let newlyRead = 0;
+    for (const id of notificationIds) {
+      const itemKey = this.itemKey(userId, id);
+            // only decrement if it was previously unread
+        pipeline.hget(itemKey,"read")
+    }
+    const readFlags = await pipeline.exec()
+    const updatePipe = redis.pipeline()
+    for (let i = 0; i < notificationIds.length; i++) {
+          const wasRead = (readFlags?.[i]?.[1] as string) === "true";
+          if (!wasRead) {
+            newlyRead++;
+            updatePipe.hset(this.itemKey(userId, notificationIds[i]!), "read", "true");
+          }
+    }
+    if (newlyRead > 0) {
+      updatePipe.decrby(UNREAD_KEY(userId), newlyRead);
+    }
+    await updatePipe.exec();
+  }
+
+  async markAllAsRead(userId: string): Promise<void> {
+      const listKey = this.listKey(userId);
+      const ids = await redis.zrange(listKey, "0", "-1");
+      if (ids.length === 0) return;
+  
+      const pipeline = redis.pipeline();
+      ids.forEach((id) => pipeline.hset(this.itemKey(userId, id), "read", "true"));
+      pipeline.set(UNREAD_KEY(userId), "0");
+      await pipeline.exec();
+    }
 }
 
 export const notificationStore = new NotificationStore();
@@ -2680,7 +2994,7 @@ export const notificationStore = new NotificationStore();
 ================================================
 FILE: apps/notification-service/src/infrastructure/redis.ts
 ================================================
-import { Redis } from "ioredis";
+import  {Redis}  from "ioredis";
 import { config } from "../config/index.js";
 import { logger } from "../config/logger.js";
 
@@ -2793,6 +3107,208 @@ export default RedisClient;
 
 
 ================================================
+FILE: apps/notification-service/src/middlewares/auth.middleware.ts
+================================================
+import type { NextFunction, Request, Response } from "express";
+import jwt from "jsonwebtoken";
+import { UnauthorizedError } from "@realtime-chat/shared-utils";
+import { config } from "../config/index.js";
+
+export const authenticate = (
+  req: Request,
+  _res: Response,
+  next: NextFunction,
+): void => {
+  try {
+    const authHeader = req.headers.authorization;
+
+    if (!authHeader?.startsWith("Bearer ")) {
+      return next(new UnauthorizedError("Authentication required"));
+    }
+
+    const accessToken = authHeader.split(" ")[1];
+    if (!accessToken) {
+      return next(new UnauthorizedError("Access token missing"));
+    }
+
+    const payload = jwt.verify(accessToken, config.JWT_ACCESS_SECRET, {
+      algorithms: ["HS256"],
+      issuer: "realtime-chat",
+      audience: "realtime-chat-api",
+    });
+
+    if (typeof payload === "string" || typeof payload.sub !== "string") {
+      return next(new UnauthorizedError("Invalid access token"));
+    }
+
+    req.user = { userId: payload.sub };
+    next();
+  } catch (error) {
+    if (error instanceof jwt.TokenExpiredError) {
+      return next(new UnauthorizedError("Access token expired"));
+    }
+    if (error instanceof jwt.JsonWebTokenError) {
+      return next(new UnauthorizedError("Invalid access token"));
+    }
+    next(error);
+  }
+};
+
+
+================================================
+FILE: apps/notification-service/src/middlewares/correlation.middleware.ts
+================================================
+import { randomUUID } from "node:crypto";
+import type { RequestHandler } from "express";
+
+export const correlationId: RequestHandler = (req, res, next) => {
+  const id =
+    (req.headers["x-correlation-id"] as string | undefined) || randomUUID();
+  req.headers["x-correlation-id"] = id;
+  res.setHeader("x-correlation-id", id);
+  next();
+};
+
+
+================================================
+FILE: apps/notification-service/src/middlewares/error.middleware.ts
+================================================
+import { AppError } from "@realtime-chat/shared-utils";
+import type{Request,Response, NextFunction } from "express";
+import { config } from "../config/index.js";
+import { logger } from "../config/logger.js";
+
+
+export const errorHandler = (err:Error,_req:Request,res:Response,_next:NextFunction): void => {
+  if (err instanceof AppError) {
+    res.status(err.statusCode).json({
+          success: false,
+          error: err.code,
+          message: err.message,
+        });
+        return;
+  }
+  logger.error( {
+    message: err.message,
+    stack: err.stack,
+  },"Unhandled error",);
+
+  res.status(500).json({
+      success: false,
+      error: "INTERNAL_SERVER_ERROR",
+      message:
+        config.NODE_ENV === "development"
+          ? err.message
+          : "Internal Server Error",
+    });
+}
+
+
+================================================
+FILE: apps/notification-service/src/modules/notification/notification.route.ts
+================================================
+import express from "express";
+import type { Request, Response } from "express";
+import { asyncHandler, UnauthorizedError, BadRequestError } from "@realtime-chat/shared-utils";
+import { notificationStore } from "../../infrastructure/notification.store.js";
+import { authenticate } from "../../middlewares/auth.middleware.js";
+import { z } from "zod";
+
+const router = express.Router();
+
+router.use(authenticate);
+
+const markReadSchema = z.object({
+  notificationIds: z.array(z.string().uuid()).min(1).max(100),
+});
+
+router.get(
+  "/",
+  asyncHandler(async (req: Request, res: Response) => {
+    if (!req.user) throw new UnauthorizedError("Authentication required");
+
+    const limit = Math.min(Number(req.query.limit) || 50, 100);
+    const offset = Number(req.query.offset) || 0;
+
+    const notifications = await notificationStore.list(
+      req.user.userId,
+      limit,
+      offset,
+    );
+    const unread = await notificationStore.unreadCount(req.user.userId);
+
+    res.status(200).json({
+      success: true,
+      data: { notifications, unread },
+    });
+  }),
+);
+
+router.get(
+  "/unread-count",
+  asyncHandler(async (req: Request, res: Response) => {
+    if (!req.user) throw new UnauthorizedError("Authentication required");
+
+    const unread = await notificationStore.unreadCount(req.user.userId);
+
+    res.status(200).json({
+      success: true,
+      data: { unread },
+    });
+  }),
+);
+
+router.post(
+  "/read",
+  asyncHandler(async (req: Request, res: Response) => {
+    if (!req.user) throw new UnauthorizedError("Authentication required");
+
+    const parsed = markReadSchema.safeParse(req.body);
+    if (!parsed.success) {
+      throw new BadRequestError(
+        parsed.error.errors.map((e) => e.message).join(", "),
+      );
+    }
+
+    await notificationStore.markAsRead(
+      req.user.userId,
+      parsed.data.notificationIds,
+    );
+
+    res.status(200).json({ success: true, message: "Marked as read" });
+  }),
+);
+
+router.post(
+  "/read-all",
+  asyncHandler(async (req: Request, res: Response) => {
+    if (!req.user) throw new UnauthorizedError("Authentication required");
+
+    await notificationStore.markAllAsRead(req.user.userId);
+
+    res.status(200).json({ success: true, message: "All marked as read" });
+  }),
+);
+
+export default router;
+
+
+================================================
+FILE: apps/notification-service/src/types/express.d.ts
+================================================
+declare global {
+  namespace Express {
+    interface Request {
+      user?: {
+        userId: string;
+      };
+    }
+  }
+}
+export {};
+
+
+================================================
 FILE: apps/presence-service/package.json
 ================================================
 {
@@ -2860,6 +3376,7 @@ import cors from "cors";
 import type { Request, Response } from "express";
 import { config } from "./config/index.js";
 import { presenceStore } from "./infrastructure/presence.store.js";
+import { redis } from "./infrastructure/redis.js";
 
 const app = express();
 app.use(helmet());
@@ -2874,6 +3391,21 @@ app.get("/health", (_req: Request, res: Response) => {
   });
 });
 
+
+app.get("/ready", async (_req, res) => {
+  try {
+    const pong = await redis.ping();
+    if (pong !== "PONG") throw new Error("Redis ping failed");
+    res.status(200).json({ ready: true, checks: { redis: "ok" } });
+  } catch (err) {
+    res.status(503).json({
+      ready: false,
+      checks: { redis: "fail" },
+      error: err instanceof Error ? err.message : "unknown",
+    });
+  }
+});
+
 // simple public API (protect later if needed)
 app.get("/presence/:userId", async (req: Request, res: Response) => {
   const userId = req.params.userId as string;
@@ -2885,6 +3417,11 @@ app.get("/presence/:userId", async (req: Request, res: Response) => {
 app.get("/presence", async (_req: Request, res: Response) => {
   const users = await presenceStore.getOnlineUsers();
   res.json({ success: true, data: { online: users, count: users.length } });
+});
+
+app.get("/presence/room/:roomId", async (req, res) => {
+  const users = await presenceStore.getUsersInRoom(req.params.roomId as string);
+  res.json({ success: true, data: { roomId: req.params.roomId, users } });
 });
 
 export default app;
@@ -3140,104 +3677,79 @@ export const startConsumers = async (): Promise<void>=>{
 
 
 ================================================
-FILE: apps/presence-service/src/infrastructure/presence-publisher.ts
-================================================
-import { createKafkaClient, KafkaProducer, TOPICS } from "@realtime-chat/shared-kafka";
-import { config } from "../config/index.js";
-import { logger } from "../config/logger.js";
-import { PresenceUserOfflineEvent, PresenceUserOnlineEvent } from "@realtime-chat/shared-events";
-import { randomUUID } from "node:crypto";
-
-const kafka = createKafkaClient({
-  clientId: "websocket-gateway-presence",
-  brokers:[config.KAFKA_BROKER]
-})
-
-const producer = new KafkaProducer(kafka)
-export async function connectPresencePublisher(): Promise<void> {
-  await producer.connect();
-  logger.info("Presence Kafka producer connected");
-}
-
-export async function disconnectPresencePublisher(): Promise<void> {
-  await producer.disconnect();
-  logger.info("Presence Kafka producer disconnected");
-}
-export async function publishUserOnline(userId: string): Promise<void> {
-  const event: PresenceUserOnlineEvent = {
-    eventId: randomUUID(),
-    eventType: "presence.user.online",
-    occurredAt: new Date().toISOString(),
-    data: {
-      userId,
-      connectedAt: new Date().toISOString()
-    }
-    
-  }
-  await producer.send(TOPICS.PRESENCE_USER_ONLINE, userId, event)
-  logger.debug("Published presence.user.online", { userId, eventId: event.eventId });
-
-}
-  export async function publishUserOffline(userId: string): Promise<void> {
-    const event: PresenceUserOfflineEvent = {
-      eventId: randomUUID(),
-      eventType: "presence.user.offline",
-      occurredAt: new Date().toISOString(),
-      data: {
-        userId,
-        disconnectedAt: new Date().toISOString(),
-      },
-    };
-  
-    await producer.send(TOPICS.PRESENCE_USER_OFFLINE, userId, event);
-    logger.debug("Published presence.user.offline", { userId, eventId: event.eventId });
-  }
-
-
-================================================
 FILE: apps/presence-service/src/infrastructure/presence.store.ts
 ================================================
 import { redis } from "./redis.js";
 
-const ONLINE_KEY ="presence:online" // Redis SET of userIds
-const LAST_SEEN_PREFIX = "presence:lastseen"
+const ONLINE_SET = "presence:online";
+const MEMBER_KEY = (userId: string) => `presence:member:${userId}`;
+const LAST_SEEN_KEY = (userId: string) => `presence:lastseen:${userId}`;
+const ROOM_PRESENCE_KEY = (roomId: string) => `presence:room:${roomId}`;
 const HEARTBEAT_TTL_SECONDS = 45; // client should send heartbeat every ~20-25s
 
 export class PresenceStore{
   async setOnline(userId: string): Promise<void>{
     const multi = redis.multi();
-    await redis.sadd(ONLINE_KEY, userId)
-    await redis.set(`${LAST_SEEN_PREFIX}${userId}`, new Date().toISOString())
-    await redis.expire(`${LAST_SEEN_PREFIX}${userId}`, HEARTBEAT_TTL_SECONDS)
-    // Also expire membership if no heartbeat arrives
-        multi.expire(`presence:member:${userId}`, HEARTBEAT_TTL_SECONDS);
-    await multi.exec();
-    // Keep the SET member alive with a separate key that has TTL
-    await redis.set(`presence-member:${userId}`,"1","EX",HEARTBEAT_TTL_SECONDS)
+        multi.sadd(ONLINE_SET, userId);
+        multi.set(MEMBER_KEY(userId), "1", "EX", HEARTBEAT_TTL_SECONDS);
+        multi.set(LAST_SEEN_KEY(userId), new Date().toISOString());
+        await multi.exec();
   }
   async setOffline(userId: string): Promise<void> {
-    await redis.srem(ONLINE_KEY, userId);
-    await redis.del(`presence:member:${userId}`);
-      await redis.set(`${LAST_SEEN_PREFIX}${userId}`, new Date().toISOString());
+    const multi = redis.multi();
+        multi.srem(ONLINE_SET, userId);
+        multi.del(MEMBER_KEY(userId));
+        multi.set(LAST_SEEN_KEY(userId), new Date().toISOString());
+        // also remove from all room presence sets (best-effort)
+        // in production you would track which rooms the user was in
+        await multi.exec();
   }
-
+  /** Only refreshes TTL â€“ call this on presence:heartbeat */
+  async heartbeat(userId: string): Promise<void> {
+      // refresh TTL only
+      await redis.set(MEMBER_KEY(userId), "1", "EX", HEARTBEAT_TTL_SECONDS);
+      await redis.set(LAST_SEEN_KEY(userId), new Date().toISOString());
+    }
   async isOnline(userId: string): Promise<boolean>{
-   return (await redis.sismember(ONLINE_KEY,userId))===1
+   return (await redis.exists(MEMBER_KEY(userId))) === 1;
   }
   async getOnlineUsers(): Promise<string[]> {
       // Clean approach: only return users that still have the TTL key
-      const members = await redis.smembers(ONLINE_KEY);
+      const members = await redis.smembers(ONLINE_SET);
       if (members.length === 0) return [];
   
       const pipeline = redis.pipeline();
-      members.forEach((id) => pipeline.exists(`presence:member:${id}`));
+      members.forEach((id) => pipeline.exists(MEMBER_KEY(id)));
       const results = await pipeline.exec();
   
-      return members.filter((_, i) => results?.[i]?.[1] === 1);
+      const stillOnline: string[] = [];
+          for (let i = 0; i < members.length; i++) {
+            if (results?.[i]?.[1] === 1) {
+              stillOnline.push(members[i]!);
+            } else {
+              // lazy cleanup of stale SET members
+              void redis.srem(ONLINE_SET, members[i]!);
+            }
+          }
+          return stillOnline;
     }
   
     async getLastSeen(userId: string): Promise<string | null> {
-      return redis.get(`${LAST_SEEN_PREFIX}${userId}`);
+      return redis.get(LAST_SEEN_KEY(userId));
+  }
+
+  // ---------- Room-level presence ----------
+    async joinRoom(userId: string, roomId: string): Promise<void> {
+      await redis.sadd(ROOM_PRESENCE_KEY(roomId), userId);
+      await redis.expire(ROOM_PRESENCE_KEY(roomId), HEARTBEAT_TTL_SECONDS * 2);
+    }
+  
+    async leaveRoom(userId: string, roomId: string): Promise<void> {
+      await redis.srem(ROOM_PRESENCE_KEY(roomId), userId);
+    }
+  
+    async getUsersInRoom(roomId: string): Promise<string[]> {
+      return redis.smembers(ROOM_PRESENCE_KEY(roomId));
     }
 }
 
@@ -3386,11 +3898,13 @@ FILE: apps/user-service/package.json
     "cors": "^2.8.5",
     "dotenv": "^16.6.1",
     "express": "^4.21.0",
+    "express-rate-limit": "^8.7.1",
     "helmet": "^7.1.0",
     "ioredis": "^6.0.0",
     "jsonwebtoken": "^9.0.3",
     "pg": "^8.23.0",
     "pino": "^10.3.1",
+    "rate-limit-redis": "^6.0.1",
     "zod": "^3.23.8"
   },
   "devDependencies": {
@@ -3600,9 +4114,12 @@ import authRoutes from "./modules/auth/auth.route.js";
 import { corsMiddleware } from "./middlewares/cors.middleware.js";
 import { errorHandler } from "./middlewares/error.middleware.js";
 import { requestLogger } from "./middlewares/req.middleware.js";
+import { correlationId } from "./middlewares/correlation.middleware.js";
+import { globalRateLimiter } from "./middlewares/rate-limit.js";
 
 const app = express();
 
+app.use(correlationId);
 app.use(corsMiddleware);
 
 app.use(
@@ -3613,6 +4130,8 @@ app.use(
 );
 
 app.use(requestLogger);
+
+app.use(globalRateLimiter)
 app.use(express.json());
 app.use(cookieParser());
 
@@ -4112,6 +4631,21 @@ export const authenticate = (
 
 
 ================================================
+FILE: apps/user-service/src/middlewares/correlation.middleware.ts
+================================================
+import { randomUUID } from "node:crypto";
+import type { RequestHandler } from "express";
+
+export const correlationId: RequestHandler = (req, res, next) => {
+  const id =
+    (req.headers["x-correlation-id"] as string | undefined) || randomUUID();
+  req.headers["x-correlation-id"] = id;
+  res.setHeader("x-correlation-id", id);
+  next();
+};
+
+
+================================================
 FILE: apps/user-service/src/middlewares/cors.middleware.ts
 ================================================
 import cors from "cors";
@@ -4174,6 +4708,95 @@ export const errorHandler = (err:Error,_req:Request,res:Response,_next:NextFunct
           : "Internal Server Error",
     });
 }
+
+
+================================================
+FILE: apps/user-service/src/middlewares/rate-limit.ts
+================================================
+import rateLimit from "express-rate-limit";
+import RedisStore, { type RedisReply } from "rate-limit-redis";
+import { redis } from "../infrastructure/redis/redis.client.js";
+
+interface RateLimiterOptions {
+  windowMs: number;
+  limit: number;
+  prefix: string;
+  error: {
+    message: string;
+    code: string;
+  };
+}
+
+export const createRateLimiter = ({
+  windowMs,
+  limit,
+  prefix,
+  error,
+}: RateLimiterOptions) => {
+  return rateLimit({
+    windowMs,
+    limit,
+    standardHeaders: "draft-8",
+    legacyHeaders: false,
+    store: new RedisStore({
+      sendCommand: async (...args: string[]) => {
+        const [command, ...commandArgs] = args;
+        if (!command) {
+              throw new Error("Redis command is required");
+            }
+        return redis.call(command, ...commandArgs) as Promise<RedisReply>;
+      },
+      prefix: `rate-limit:${prefix}:`,
+    }),
+    handler: (_req, res) => {
+      res.status(429).json({
+        success: false,
+        error: error.code,
+        message: error.message,
+      });
+    },
+  });
+};
+
+export const globalRateLimiter = createRateLimiter({
+  windowMs: 15 * 60 * 1000, // 15 min
+  limit: 300,
+  prefix: "user-global",
+  error: {
+    code: "GLOBAL_RATE_LIMIT_EXCEEDED",
+    message: "Too many requests. Please try again later.",
+  },
+});
+
+export const loginRateLimiter = createRateLimiter({
+  windowMs: 60 * 1000, // 1 min
+  limit: 5,
+  prefix: "login",
+  error: {
+    code: "LOGIN_RATE_LIMIT_EXCEEDED",
+    message: "Too many login attempts. Please try again later.",
+  },
+});
+
+export const registerRateLimiter = createRateLimiter({
+  windowMs: 60 * 1000,
+  limit: 5,
+  prefix: "register",
+  error: {
+    code: "REGISTRATION_RATE_LIMIT_EXCEEDED",
+    message: "Too many registration attempts. Please try again later.",
+  },
+});
+
+export const refreshTokenRateLimiter = createRateLimiter({
+  windowMs: 60 * 1000,
+  limit: 10,
+  prefix: "refresh-token",
+  error: {
+    code: "REFRESH_TOKEN_RATE_LIMIT_EXCEEDED",
+    message: "Too many refresh-token requests. Please try again later.",
+  },
+});
 
 
 ================================================
@@ -4400,13 +5023,14 @@ import { validate } from "../../middlewares/validate.middleware.js";
 import { loginUserSchema, registerUserSchema } from "./auth.schema.js";
 import { login, logout, me, refresh, register } from "./auth.controller.js";
 import { authenticate } from "../../middlewares/auth.middleware.js";
+import { loginRateLimiter, refreshTokenRateLimiter, registerRateLimiter } from "../../middlewares/rate-limit.js";
 
 
 const router = express.Router();
 
-router.post("/register", validate(registerUserSchema), register);
-router.post("/login", validate(loginUserSchema), login);
-router.post("/refresh", refresh);
+router.post("/register",registerRateLimiter, validate(registerUserSchema), register);
+router.post("/login",loginRateLimiter, validate(loginUserSchema), login);
+router.post("/refresh",refreshTokenRateLimiter, refresh);
 router.post("/logout", logout);
 router.get(
   "/me",
@@ -4711,6 +5335,1990 @@ export {};
 
 
 ================================================
+FILE: apps/web/index.html
+================================================
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Realtime Chat</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+
+
+================================================
+FILE: apps/web/package.json
+================================================
+{
+  "name": "@realtime-chat/web",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "socket.io-client": "^4.8.4"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.7.0",
+    "typescript": "^5.9.3",
+    "vite": "^5.4.21"
+  }
+}
+
+
+
+================================================
+FILE: apps/web/tsconfig.app.json
+================================================
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "useDefineForClassFields": true,
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+    "jsx": "react-jsx",
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUncheckedIndexedAccess": true
+  },
+  "include": ["src"]
+}
+
+
+================================================
+FILE: apps/web/tsconfig.json
+================================================
+{
+  "files": [],
+  "references": [
+    { "path": "./tsconfig.app.json" },
+    { "path": "./tsconfig.node.json" }
+  ]
+}
+
+
+================================================
+FILE: apps/web/tsconfig.node.json
+================================================
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2023"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true
+  },
+  "include": ["vite.config.ts"]
+}
+
+
+================================================
+FILE: apps/web/vite.config.ts
+================================================
+import { defineConfig } from "vite";
+import react from "@vitejs/plugin-react";
+
+export default defineConfig({
+  plugins: [react()],
+  server: {
+    port: 3000,
+  },
+});
+
+
+================================================
+FILE: apps/web/.env.example
+================================================
+VITE_USER_URL=http://localhost:4001
+VITE_CHAT_URL=http://localhost:4002
+VITE_GATEWAY_URL=http://localhost:4003
+VITE_PRESENCE_URL=http://localhost:4004
+VITE_NOTIFICATION_URL=http://localhost:4005
+
+
+================================================
+FILE: apps/web/src/App.tsx
+================================================
+import { AuthProvider, useAuth } from "./store/auth";
+import { AuthPage } from "./pages/AuthPage";
+import { ChatPage } from "./pages/ChatPage";
+
+function Root() {
+  const { user, loading } = useAuth();
+
+  if (loading) {
+    return (
+      <div className="auth-page">
+        <div className="auth-card">
+          <h1>Realtime Chat</h1>
+          <p className="subtitle">Loading sessionâ€¦</p>
+        </div>
+      </div>
+    );
+  }
+
+  return user ? <ChatPage /> : <AuthPage />;
+}
+
+export default function App() {
+  return (
+    <AuthProvider>
+      <Root />
+    </AuthProvider>
+  );
+}
+
+
+================================================
+FILE: apps/web/src/main.tsx
+================================================
+import { StrictMode } from "react";
+import { createRoot } from "react-dom/client";
+import App from "./App";
+import "./styles.css";
+
+createRoot(document.getElementById("root")!).render(
+  <StrictMode>
+    <App />
+  </StrictMode>,
+);
+
+
+================================================
+FILE: apps/web/src/styles.css
+================================================
+:root {
+  --bg: #0b0f14;
+  --bg-elevated: #121820;
+  --bg-hover: #1a222d;
+  --border: #243041;
+  --text: #e8eef6;
+  --text-muted: #8b9bb0;
+  --accent: #3d8bfd;
+  --accent-hover: #5a9fff;
+  --success: #3ecf8e;
+  --danger: #f07178;
+  --warning: #e6b450;
+  --radius: 12px;
+  --font: "IBM Plex Sans", system-ui, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family: var(--font);
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.45;
+}
+
+button,
+input,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  cursor: pointer;
+  border: none;
+  background: none;
+}
+
+a {
+  color: var(--accent);
+}
+
+.auth-page {
+  min-height: 100%;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background:
+    radial-gradient(ellipse 80% 50% at 50% -20%, rgba(61, 139, 253, 0.18), transparent),
+    var(--bg);
+}
+
+.auth-card {
+  width: min(420px, 100%);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 32px;
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.35);
+}
+
+.auth-card h1 {
+  margin: 0 0 4px;
+  font-size: 1.5rem;
+}
+
+.auth-card .subtitle {
+  color: var(--text-muted);
+  margin-bottom: 24px;
+  font-size: 0.95rem;
+}
+
+.form-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 14px;
+}
+
+.form-group label {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.form-group input {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 14px;
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+.form-group input:focus {
+  border-color: var(--accent);
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border-radius: 10px;
+  padding: 12px 16px;
+  font-weight: 600;
+  transition: background 0.15s, opacity 0.15s;
+}
+
+.btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.btn-primary {
+  background: var(--accent);
+  color: #fff;
+  width: 100%;
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+.btn-ghost {
+  background: transparent;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+}
+
+.btn-ghost:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.auth-switch {
+  margin-top: 18px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 0.9rem;
+}
+
+.auth-switch button {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.error-banner {
+  background: rgba(240, 113, 120, 0.12);
+  border: 1px solid rgba(240, 113, 120, 0.35);
+  color: var(--danger);
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin-bottom: 14px;
+  font-size: 0.9rem;
+}
+
+.app-shell {
+  display: grid;
+  grid-template-columns: 300px 1fr 280px;
+  height: 100%;
+  overflow: hidden;
+}
+
+@media (max-width: 960px) {
+  .app-shell {
+    grid-template-columns: 260px 1fr;
+  }
+  .sidebar-right {
+    display: none;
+  }
+}
+
+.sidebar {
+  background: var(--bg-elevated);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.sidebar-right {
+  border-right: none;
+  border-left: 1px solid var(--border);
+}
+
+.sidebar-header {
+  padding: 16px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.user-chip {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.user-chip strong {
+  font-size: 0.95rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.user-chip span {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+  margin-right: 6px;
+}
+
+.status-dot.online {
+  background: var(--success);
+  box-shadow: 0 0 0 3px rgba(62, 207, 142, 0.2);
+}
+
+.status-dot.offline {
+  background: var(--text-muted);
+}
+
+.sidebar-actions {
+  padding: 12px 16px;
+  display: flex;
+  gap: 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.sidebar-actions .btn {
+  flex: 1;
+  padding: 8px 10px;
+  font-size: 0.85rem;
+}
+
+.room-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px;
+}
+
+.room-item {
+  width: 100%;
+  text-align: left;
+  padding: 12px;
+  border-radius: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 4px;
+}
+
+.room-item:hover {
+  background: var(--bg-hover);
+}
+
+.room-item.active {
+  background: rgba(61, 139, 253, 0.15);
+  border: 1px solid rgba(61, 139, 253, 0.3);
+}
+
+.room-item .name {
+  font-weight: 600;
+  font-size: 0.95rem;
+}
+
+.room-item .meta {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+.chat-main {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--bg);
+}
+
+.chat-header {
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: var(--bg-elevated);
+}
+
+.chat-header h2 {
+  margin: 0;
+  font-size: 1.1rem;
+}
+
+.chat-header .meta {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.message {
+  max-width: min(70%, 560px);
+  padding: 10px 14px;
+  border-radius: 14px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  align-self: flex-start;
+}
+
+.message.mine {
+  align-self: flex-end;
+  background: rgba(61, 139, 253, 0.18);
+  border-color: rgba(61, 139, 253, 0.35);
+}
+
+.message .sender {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+  font-weight: 500;
+}
+
+.message .body {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.message .footer {
+  margin-top: 6px;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  font-family: var(--mono);
+}
+
+.typing-bar {
+  min-height: 22px;
+  padding: 0 20px 6px;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.composer {
+  padding: 14px 16px 18px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  gap: 10px;
+  background: var(--bg-elevated);
+}
+
+.composer input {
+  flex: 1;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px 14px;
+  outline: none;
+}
+
+.composer input:focus {
+  border-color: var(--accent);
+}
+
+.composer .btn-primary {
+  width: auto;
+  padding-inline: 20px;
+}
+
+.empty-state {
+  flex: 1;
+  display: grid;
+  place-items: center;
+  color: var(--text-muted);
+  text-align: center;
+  padding: 40px;
+}
+
+.empty-state h3 {
+  margin: 0 0 8px;
+  color: var(--text);
+}
+
+.panel-section {
+  padding: 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.panel-section h3 {
+  margin: 0 0 12px;
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+
+.notif-item {
+  padding: 10px;
+  border-radius: 10px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  margin-bottom: 8px;
+  font-size: 0.85rem;
+}
+
+.notif-item .time {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  margin-top: 4px;
+  font-family: var(--mono);
+}
+
+.member-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  font-size: 0.9rem;
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: grid;
+  place-items: center;
+  z-index: 50;
+  padding: 20px;
+}
+
+.modal {
+  width: min(420px, 100%);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 24px;
+}
+
+.modal h3 {
+  margin: 0 0 16px;
+}
+
+.modal-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 16px;
+  justify-content: flex-end;
+}
+
+.badge {
+  background: var(--danger);
+  color: #fff;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  padding: 2px 7px;
+  min-width: 18px;
+  text-align: center;
+}
+
+
+================================================
+FILE: apps/web/src/vite-env.d.ts
+================================================
+/// <reference types="vite/client" />
+
+interface ImportMetaEnv {
+  readonly VITE_USER_URL: string;
+  readonly VITE_CHAT_URL: string;
+  readonly VITE_GATEWAY_URL: string;
+  readonly VITE_PRESENCE_URL: string;
+  readonly VITE_NOTIFICATION_URL: string;
+}
+
+interface ImportMeta {
+  readonly env: ImportMetaEnv;
+}
+
+
+================================================
+FILE: apps/web/src/api/client.ts
+================================================
+import type {
+  ApiResponse,
+  Message,
+  NotificationItem,
+  Room,
+  User,
+} from "../types";
+
+const USER_URL = import.meta.env.VITE_USER_URL;
+const CHAT_URL = import.meta.env.VITE_CHAT_URL;
+const NOTIFICATION_URL = import.meta.env.VITE_NOTIFICATION_URL;
+const PRESENCE_URL = import.meta.env.VITE_PRESENCE_URL;
+
+let accessToken: string | null = localStorage.getItem("accessToken");
+
+export function setAccessToken(token: string | null) {
+  accessToken = token;
+  if (token) localStorage.setItem("accessToken", token);
+  else localStorage.removeItem("accessToken");
+}
+
+export function getAccessToken() {
+  return accessToken;
+}
+
+async function request<T>(
+  base: string,
+  path: string,
+  options: RequestInit = {},
+): Promise<ApiResponse<T>> {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    ...(options.headers as Record<string, string> | undefined),
+  };
+
+  if (accessToken) {
+    headers.Authorization = `Bearer ${accessToken}`;
+  }
+
+  const res = await fetch(`${base}${path}`, {
+    ...options,
+    headers,
+    credentials: "include",
+  });
+
+  const body = (await res.json().catch(() => ({}))) as ApiResponse<T>;
+
+  if (!res.ok) {
+    if (res.status === 401 && path !== "/auth/refresh" && path !== "/auth/login") {
+      try {
+        const refreshed = await request<{ accessToken: string }>(
+          USER_URL,
+          "/auth/refresh",
+          { method: "POST" },
+        );
+        if (refreshed.data?.accessToken) {
+          setAccessToken(refreshed.data.accessToken);
+          headers.Authorization = `Bearer ${refreshed.data.accessToken}`;
+          const retry = await fetch(`${base}${path}`, {
+            ...options,
+            headers,
+            credentials: "include",
+          });
+          const retryBody = (await retry.json()) as ApiResponse<T>;
+          if (!retry.ok) {
+            throw new Error(
+              retryBody.message || retryBody.error || `HTTP ${retry.status}`,
+            );
+          }
+          return retryBody;
+        }
+      } catch {
+        setAccessToken(null);
+      }
+    }
+    throw new Error(body.message || body.error || `HTTP ${res.status}`);
+  }
+
+  return body;
+}
+
+export const authApi = {
+  register: (data: {
+    email: string;
+    password: string;
+    firstName: string;
+    lastName: string;
+  }) =>
+    request<User>(USER_URL, "/auth/register", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+
+  login: (data: { email: string; password: string }) =>
+    request<{ user: User; accessToken: string }>(USER_URL, "/auth/login", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+
+  refresh: () =>
+    request<{ accessToken: string }>(USER_URL, "/auth/refresh", {
+      method: "POST",
+    }),
+
+  logout: () => request(USER_URL, "/auth/logout", { method: "POST" }),
+
+  me: () => request<User>(USER_URL, "/auth/me"),
+};
+
+export const chatApi = {
+  getRooms: () => request<Room[]>(CHAT_URL, "/rooms"),
+
+  getRoom: (roomId: string) => request<Room>(CHAT_URL, `/rooms/${roomId}`),
+
+  createPrivate: (otherUserId: string) =>
+    request<Room>(CHAT_URL, "/rooms", {
+      method: "POST",
+      body: JSON.stringify({ type: "PRIVATE", otherUserId }),
+    }),
+
+  createGroup: (name: string, memberIds: string[] = []) =>
+    request<Room>(CHAT_URL, "/rooms", {
+      method: "POST",
+      body: JSON.stringify({ type: "GROUP", name, memberIds }),
+    }),
+
+  addMember: (roomId: string, userId: string) =>
+    request<Room>(CHAT_URL, `/rooms/${roomId}/members`, {
+      method: "POST",
+      body: JSON.stringify({ userId }),
+    }),
+
+  getMessages: (roomId: string, limit = 50, before?: string) => {
+    const qs = new URLSearchParams({ limit: String(limit) });
+    if (before) qs.set("before", before);
+    return request<{
+      messages: Message[];
+      nextCursor: string | null;
+      hasMore: boolean;
+    }>(CHAT_URL, `/rooms/${roomId}/messages?${qs}`);
+  },
+
+  sendMessage: (roomId: string, content: string) =>
+    request<Message>(CHAT_URL, `/rooms/${roomId}/messages`, {
+      method: "POST",
+      body: JSON.stringify({ content }),
+    }),
+
+  markSeen: (roomId: string, messageIds: string[]) =>
+    request(CHAT_URL, `/rooms/${roomId}/messages/seen`, {
+      method: "POST",
+      body: JSON.stringify({ messageIds }),
+    }),
+};
+
+export const notificationApi = {
+  list: (limit = 50, offset = 0) =>
+    request<{ notifications: NotificationItem[]; unread: number }>(
+      NOTIFICATION_URL,
+      `/notifications?limit=${limit}&offset=${offset}`,
+    ),
+
+  unreadCount: () =>
+    request<{ unread: number }>(NOTIFICATION_URL, "/notifications/unread-count"),
+
+  markRead: (notificationIds: string[]) =>
+    request(NOTIFICATION_URL, "/notifications/read", {
+      method: "POST",
+      body: JSON.stringify({ notificationIds }),
+    }),
+
+  markAllRead: () =>
+    request(NOTIFICATION_URL, "/notifications/read-all", { method: "POST" }),
+};
+
+export const presenceApi = {
+  getUser: (userId: string) =>
+    request<{ userId: string; online: boolean; lastSeen: string | null }>(
+      PRESENCE_URL,
+      `/presence/${userId}`,
+    ),
+
+  getOnline: () =>
+    request<{ online: string[]; count: number }>(PRESENCE_URL, "/presence"),
+};
+
+
+================================================
+FILE: apps/web/src/api/socket.ts
+================================================
+import { io, type Socket } from "socket.io-client";
+import { getAccessToken } from "./client";
+
+const GATEWAY_URL = import.meta.env.VITE_GATEWAY_URL;
+
+let socket: Socket | null = null;
+
+export function connectSocket(): Socket {
+  if (socket?.connected) return socket;
+
+  const token = getAccessToken();
+  if (!token) {
+    throw new Error("No access token â€“ login first");
+  }
+
+  socket = io(GATEWAY_URL, {
+    auth: { token },
+    transports: ["websocket", "polling"],
+    reconnection: true,
+    reconnectionAttempts: 10,
+    reconnectionDelay: 1000,
+  });
+
+  return socket;
+}
+
+export function getSocket(): Socket | null {
+  return socket;
+}
+
+export function disconnectSocket() {
+  if (socket) {
+    socket.disconnect();
+    socket = null;
+  }
+}
+
+export function joinRoom(
+  roomId: string,
+): Promise<{ success: boolean; error?: string }> {
+  return new Promise((resolve) => {
+    const s = getSocket();
+    if (!s) {
+      resolve({ success: false, error: "Not connected" });
+      return;
+    }
+    s.emit(
+      "join-room",
+      { roomId },
+      (res: { success: boolean; error?: string }) => {
+        resolve(res ?? { success: false, error: "No ack" });
+      },
+    );
+  });
+}
+
+export function leaveRoom(roomId: string): Promise<{ success: boolean }> {
+  return new Promise((resolve) => {
+    const s = getSocket();
+    if (!s) {
+      resolve({ success: false });
+      return;
+    }
+    s.emit("leave-room", { roomId }, (res: { success: boolean }) => {
+      resolve(res ?? { success: false });
+    });
+  });
+}
+
+export function emitTypingStart(roomId: string) {
+  getSocket()?.emit("typing:start", { roomId });
+}
+
+export function emitTypingStop(roomId: string) {
+  getSocket()?.emit("typing:stop", { roomId });
+}
+
+export function emitMessageSeen(roomId: string, messageIds: string[]) {
+  getSocket()?.emit("message:seen", { roomId, messageIds });
+}
+
+export function emitHeartbeat() {
+  getSocket()?.emit("presence:heartbeat");
+}
+
+
+================================================
+FILE: apps/web/src/hooks/useChat.ts
+================================================
+import { useCallback, useEffect, useRef, useState } from "react";
+import { chatApi, notificationApi, presenceApi } from "../api/client";
+import {
+  connectSocket,
+  emitHeartbeat,
+  emitMessageSeen,
+  emitTypingStart,
+  emitTypingStop,
+  joinRoom,
+  leaveRoom,
+} from "../api/socket";
+import type { Message, NotificationItem, Room } from "../types";
+import { useAuth } from "../store/auth";
+
+export function useChat() {
+  const { user } = useAuth();
+  const [rooms, setRooms] = useState<Room[]>([]);
+  const [activeRoomId, setActiveRoomId] = useState<string | null>(null);
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [onlineUsers, setOnlineUsers] = useState<Set<string>>(new Set());
+  const [typingUsers, setTypingUsers] = useState<Record<string, string[]>>({});
+  const [notifications, setNotifications] = useState<NotificationItem[]>([]);
+  const [unread, setUnread] = useState(0);
+  const [loadingRooms, setLoadingRooms] = useState(false);
+  const [loadingMessages, setLoadingMessages] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [connected, setConnected] = useState(false);
+
+  const activeRoomRef = useRef<string | null>(null);
+  const typingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    activeRoomRef.current = activeRoomId;
+  }, [activeRoomId]);
+
+  const loadRooms = useCallback(async () => {
+    setLoadingRooms(true);
+    setError(null);
+    try {
+      const res = await chatApi.getRooms();
+      setRooms(res.data ?? []);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to load rooms");
+    } finally {
+      setLoadingRooms(false);
+    }
+  }, []);
+
+  const loadMessages = useCallback(
+    async (roomId: string) => {
+      setLoadingMessages(true);
+      setError(null);
+      try {
+        const res = await chatApi.getMessages(roomId, 50);
+        const list = [...(res.data?.messages ?? [])].reverse();
+        setMessages(list);
+
+        const ids = list
+          .filter((m) => m.senderId !== user?.id && m.status !== "SEEN")
+          .map((m) => m.id);
+        if (ids.length > 0) {
+          emitMessageSeen(roomId, ids);
+          void chatApi.markSeen(roomId, ids).catch(() => undefined);
+        }
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "Failed to load messages");
+      } finally {
+        setLoadingMessages(false);
+      }
+    },
+    [user?.id],
+  );
+
+  const selectRoom = useCallback(
+    async (roomId: string) => {
+      const prev = activeRoomRef.current;
+      if (prev && prev !== roomId) {
+        await leaveRoom(prev);
+      }
+      setActiveRoomId(roomId);
+      await joinRoom(roomId);
+      await loadMessages(roomId);
+    },
+    [loadMessages],
+  );
+
+  const sendMessage = useCallback(
+    async (content: string) => {
+      if (!activeRoomId || !content.trim()) return;
+      try {
+        const res = await chatApi.sendMessage(activeRoomId, content.trim());
+        if (res.data) {
+          setMessages((prev) => {
+            if (prev.some((m) => m.id === res.data!.id)) return prev;
+            return [...prev, res.data!];
+          });
+        }
+        emitTypingStop(activeRoomId);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "Failed to send");
+        throw e;
+      }
+    },
+    [activeRoomId],
+  );
+
+  const onTyping = useCallback(() => {
+    if (!activeRoomId) return;
+    emitTypingStart(activeRoomId);
+    if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+    typingTimeoutRef.current = setTimeout(() => {
+      if (activeRoomId) emitTypingStop(activeRoomId);
+    }, 2000);
+  }, [activeRoomId]);
+
+  const createPrivate = useCallback(
+    async (otherUserId: string) => {
+      const res = await chatApi.createPrivate(otherUserId);
+      await loadRooms();
+      if (res.data) await selectRoom(res.data.id);
+      return res.data;
+    },
+    [loadRooms, selectRoom],
+  );
+
+  const createGroup = useCallback(
+    async (name: string, memberIds: string[] = []) => {
+      const res = await chatApi.createGroup(name, memberIds);
+      await loadRooms();
+      if (res.data) await selectRoom(res.data.id);
+      return res.data;
+    },
+    [loadRooms, selectRoom],
+  );
+
+  const loadNotifications = useCallback(async () => {
+    try {
+      const res = await notificationApi.list();
+      setNotifications(res.data?.notifications ?? []);
+      setUnread(res.data?.unread ?? 0);
+    } catch {
+      // non-fatal
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!user) return;
+
+    let s;
+    try {
+      s = connectSocket();
+    } catch {
+      return;
+    }
+
+    const onConnect = () => setConnected(true);
+    const onDisconnect = () => setConnected(false);
+
+    const onMessageNew = (payload: {
+      messageId: string;
+      roomId: string;
+      senderId: string;
+      content: string;
+      createdAt: string;
+      status: Message["status"];
+    }) => {
+      const msg: Message = {
+        id: payload.messageId,
+        roomId: payload.roomId,
+        senderId: payload.senderId,
+        content: payload.content,
+        createdAt: payload.createdAt,
+        status: payload.status ?? "SENT",
+      };
+
+      if (activeRoomRef.current === payload.roomId) {
+        setMessages((prev) => {
+          if (prev.some((m) => m.id === msg.id)) return prev;
+          return [...prev, msg];
+        });
+        if (payload.senderId !== user.id) {
+          emitMessageSeen(payload.roomId, [payload.messageId]);
+        }
+      }
+
+      setRooms((prev) => {
+        const idx = prev.findIndex((r) => r.id === payload.roomId);
+        if (idx < 0) return prev;
+        const room = prev[idx]!;
+        const rest = prev.filter((r) => r.id !== payload.roomId);
+        return [{ ...room, updatedAt: payload.createdAt }, ...rest];
+      });
+    };
+
+    const onMessageStatus = (payload: {
+      messageId: string;
+      roomId: string;
+      status: Message["status"];
+    }) => {
+      if (activeRoomRef.current !== payload.roomId) return;
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === payload.messageId ? { ...m, status: payload.status } : m,
+        ),
+      );
+    };
+
+    const onTypingStart = (payload: { roomId: string; userId: string }) => {
+      if (payload.userId === user.id) return;
+      setTypingUsers((prev) => {
+        const list = prev[payload.roomId] ?? [];
+        if (list.includes(payload.userId)) return prev;
+        return { ...prev, [payload.roomId]: [...list, payload.userId] };
+      });
+    };
+
+    const onTypingStop = (payload: { roomId: string; userId: string }) => {
+      setTypingUsers((prev) => {
+        const list = (prev[payload.roomId] ?? []).filter(
+          (id) => id !== payload.userId,
+        );
+        return { ...prev, [payload.roomId]: list };
+      });
+    };
+
+    const onPresenceOnline = (payload: { userId: string }) => {
+      setOnlineUsers((prev) => new Set(prev).add(payload.userId));
+    };
+
+    const onPresenceOffline = (payload: { userId: string }) => {
+      setOnlineUsers((prev) => {
+        const next = new Set(prev);
+        next.delete(payload.userId);
+        return next;
+      });
+    };
+
+    const onNotification = (payload: NotificationItem) => {
+      setNotifications((prev) => [payload, ...prev]);
+      setUnread((n) => n + 1);
+    };
+
+    s.on("connect", onConnect);
+    s.on("disconnect", onDisconnect);
+    s.on("message:new", onMessageNew);
+    s.on("message:status", onMessageStatus);
+    s.on("typing:start", onTypingStart);
+    s.on("typing:stop", onTypingStop);
+    s.on("presence-online", onPresenceOnline);
+    s.on("presence:offline", onPresenceOffline);
+    s.on("presence-offline", onPresenceOffline);
+    s.on("notification:new", onNotification);
+
+    if (s.connected) setConnected(true);
+
+    const hb = setInterval(() => emitHeartbeat(), 20_000);
+
+    void presenceApi.getOnline().then((res) => {
+      if (res.data?.online) setOnlineUsers(new Set(res.data.online));
+    });
+
+    void loadRooms();
+    void loadNotifications();
+
+    return () => {
+      clearInterval(hb);
+      s.off("connect", onConnect);
+      s.off("disconnect", onDisconnect);
+      s.off("message:new", onMessageNew);
+      s.off("message:status", onMessageStatus);
+      s.off("typing:start", onTypingStart);
+      s.off("typing:stop", onTypingStop);
+      s.off("presence-online", onPresenceOnline);
+      s.off("presence:offline", onPresenceOffline);
+      s.off("presence-offline", onPresenceOffline);
+      s.off("notification:new", onNotification);
+    };
+  }, [user, loadRooms, loadNotifications]);
+
+  const activeRoom = rooms.find((r) => r.id === activeRoomId) ?? null;
+
+  return {
+    rooms,
+    activeRoom,
+    activeRoomId,
+    messages,
+    onlineUsers,
+    typingUsers,
+    notifications,
+    unread,
+    loadingRooms,
+    loadingMessages,
+    error,
+    connected,
+    selectRoom,
+    sendMessage,
+    onTyping,
+    createPrivate,
+    createGroup,
+    loadRooms,
+    loadNotifications,
+    setError,
+  };
+}
+
+
+================================================
+FILE: apps/web/src/pages/AuthPage.tsx
+================================================
+import { FormEvent, useState } from "react";
+import { useAuth } from "../store/auth";
+
+export function AuthPage() {
+  const { login, register } = useAuth();
+  const [mode, setMode] = useState<"login" | "register">("login");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [firstName, setFirstName] = useState("");
+  const [lastName, setLastName] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const onSubmit = async (e: FormEvent) => {
+    e.preventDefault();
+    setError(null);
+    setBusy(true);
+    try {
+      if (mode === "login") {
+        await login(email, password);
+      } else {
+        await register({ email, password, firstName, lastName });
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Request failed");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="auth-page">
+      <div className="auth-card">
+        <h1>Realtime Chat</h1>
+        <p className="subtitle">
+          {mode === "login" ? "Sign in to continue" : "Create an account"}
+        </p>
+
+        {error && <div className="error-banner">{error}</div>}
+
+        <form onSubmit={onSubmit}>
+          {mode === "register" && (
+            <>
+              <div className="form-group">
+                <label>First name</label>
+                <input
+                  value={firstName}
+                  onChange={(e) => setFirstName(e.target.value)}
+                  required
+                  autoComplete="given-name"
+                />
+              </div>
+              <div className="form-group">
+                <label>Last name</label>
+                <input
+                  value={lastName}
+                  onChange={(e) => setLastName(e.target.value)}
+                  required
+                  autoComplete="family-name"
+                />
+              </div>
+            </>
+          )}
+
+          <div className="form-group">
+            <label>Email</label>
+            <input
+              type="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              required
+              autoComplete="email"
+            />
+          </div>
+
+          <div className="form-group">
+            <label>Password</label>
+            <input
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              required
+              minLength={8}
+              autoComplete={
+                mode === "login" ? "current-password" : "new-password"
+              }
+            />
+          </div>
+
+          <button className="btn btn-primary" type="submit" disabled={busy}>
+            {busy ? "Please waitâ€¦" : mode === "login" ? "Sign in" : "Register"}
+          </button>
+        </form>
+
+        <div className="auth-switch">
+          {mode === "login" ? (
+            <>
+              No account?{" "}
+              <button type="button" onClick={() => setMode("register")}>
+                Register
+              </button>
+            </>
+          ) : (
+            <>
+              Already have an account?{" "}
+              <button type="button" onClick={() => setMode("login")}>
+                Sign in
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+================================================
+FILE: apps/web/src/pages/ChatPage.tsx
+================================================
+import { FormEvent, useEffect, useRef, useState } from "react";
+import { useAuth } from "../store/auth";
+import { useChat } from "../hooks/useChat";
+import { notificationApi } from "../api/client";
+
+function roomTitle(
+  room: {
+    name: string | null;
+    type: string;
+    members: { userId: string }[];
+  },
+  myId: string,
+) {
+  if (room.type === "GROUP") return room.name || "Group";
+  const other = room.members.find((m) => m.userId !== myId);
+  return other ? `DM Â· ${other.userId.slice(0, 8)}â€¦` : "Private chat";
+}
+
+function statusIcon(status: string) {
+  if (status === "SEEN") return "âœ“âœ“";
+  if (status === "DELIVERED") return "âœ“âœ“";
+  return "âœ“";
+}
+
+export function ChatPage() {
+  const { user, logout } = useAuth();
+  const {
+    rooms,
+    activeRoom,
+    activeRoomId,
+    messages,
+    onlineUsers,
+    typingUsers,
+    notifications,
+    unread,
+    loadingRooms,
+    connected,
+    error,
+    selectRoom,
+    sendMessage,
+    onTyping,
+    createPrivate,
+    createGroup,
+    loadNotifications,
+    setError,
+  } = useChat();
+
+  const [text, setText] = useState("");
+  const [sending, setSending] = useState(false);
+  const [showPrivateModal, setShowPrivateModal] = useState(false);
+  const [showGroupModal, setShowGroupModal] = useState(false);
+  const [otherUserId, setOtherUserId] = useState("");
+  const [groupName, setGroupName] = useState("");
+  const bottomRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages, activeRoomId]);
+
+  const onSend = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!text.trim() || sending) return;
+    setSending(true);
+    try {
+      await sendMessage(text);
+      setText("");
+    } catch {
+      // error already set in hook
+    } finally {
+      setSending(false);
+    }
+  };
+
+  const handleCreatePrivate = async (e: FormEvent) => {
+    e.preventDefault();
+    try {
+      await createPrivate(otherUserId.trim());
+      setShowPrivateModal(false);
+      setOtherUserId("");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed");
+    }
+  };
+
+  const handleCreateGroup = async (e: FormEvent) => {
+    e.preventDefault();
+    try {
+      await createGroup(groupName.trim());
+      setShowGroupModal(false);
+      setGroupName("");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed");
+    }
+  };
+
+  const markAllRead = async () => {
+    try {
+      await notificationApi.markAllRead();
+      await loadNotifications();
+    } catch {
+      // ignore
+    }
+  };
+
+  if (!user) return null;
+
+  const typingInRoom = activeRoomId
+    ? (typingUsers[activeRoomId] ?? []).filter((id) => id !== user.id)
+    : [];
+
+  return (
+    <div className="app-shell">
+      <aside className="sidebar">
+        <div className="sidebar-header">
+          <div className="user-chip">
+            <strong>
+              {user.firstName} {user.lastName}
+            </strong>
+            <span title={user.id}>
+              <span
+                className={`status-dot ${connected ? "online" : "offline"}`}
+              />
+              {connected ? "Connected" : "Disconnected"}
+            </span>
+            <span
+              style={{
+                fontSize: "0.7rem",
+                fontFamily: "var(--mono)",
+                color: "var(--text-muted)",
+                cursor: "pointer",
+              }}
+              title="Click to copy full user id"
+              onClick={() => void navigator.clipboard.writeText(user.id)}
+            >
+              {user.id}
+            </span>
+          </div>
+          <button
+            className="btn btn-ghost"
+            onClick={() => void logout()}
+            title="Logout"
+          >
+            Out
+          </button>
+        </div>
+
+        <div className="sidebar-actions">
+          <button
+            className="btn btn-ghost"
+            onClick={() => setShowPrivateModal(true)}
+          >
+            + Private
+          </button>
+          <button
+            className="btn btn-ghost"
+            onClick={() => setShowGroupModal(true)}
+          >
+            + Group
+          </button>
+        </div>
+
+        <div className="room-list">
+          {loadingRooms && <div className="empty-state">Loading roomsâ€¦</div>}
+          {!loadingRooms && rooms.length === 0 && (
+            <div className="empty-state">
+              <p>No rooms yet. Create one to start chatting.</p>
+            </div>
+          )}
+          {rooms.map((room) => (
+            <button
+              key={room.id}
+              className={`room-item ${room.id === activeRoomId ? "active" : ""}`}
+              onClick={() => void selectRoom(room.id)}
+            >
+              <span className="name">{roomTitle(room, user.id)}</span>
+              <span className="meta">
+                {room.type} Â· {room.members.length} member
+                {room.members.length !== 1 ? "s" : ""}
+              </span>
+            </button>
+          ))}
+        </div>
+      </aside>
+
+      <main className="chat-main">
+        {error && (
+          <div className="error-banner" style={{ margin: 12 }}>
+            {error}
+            <button
+              type="button"
+              style={{
+                marginLeft: 12,
+                color: "inherit",
+                textDecoration: "underline",
+              }}
+              onClick={() => setError(null)}
+            >
+              dismiss
+            </button>
+          </div>
+        )}
+
+        {!activeRoom ? (
+          <div className="empty-state">
+            <h3>Select a room</h3>
+            <p>Pick a conversation on the left or create a new one.</p>
+          </div>
+        ) : (
+          <>
+            <div className="chat-header">
+              <div>
+                <h2>{roomTitle(activeRoom, user.id)}</h2>
+                <div className="meta">
+                  {activeRoom.members.map((m) => (
+                    <span key={m.id} style={{ marginRight: 10 }}>
+                      <span
+                        className={`status-dot ${onlineUsers.has(m.userId) ? "online" : "offline"}`}
+                      />
+                      {m.userId === user.id ? "you" : m.userId.slice(0, 8)}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            <div className="messages">
+              {messages.map((m) => {
+                const mine = m.senderId === user.id;
+                return (
+                  <div key={m.id} className={`message ${mine ? "mine" : ""}`}>
+                    {!mine && (
+                      <div className="sender">{m.senderId.slice(0, 8)}â€¦</div>
+                    )}
+                    <div className="body">{m.content}</div>
+                    <div className="footer">
+                      <span>{new Date(m.createdAt).toLocaleTimeString()}</span>
+                      {mine && (
+                        <span title={m.status}>{statusIcon(m.status)}</span>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+              <div ref={bottomRef} />
+            </div>
+
+            <div className="typing-bar">
+              {typingInRoom.length > 0
+                ? `${typingInRoom.map((id) => id.slice(0, 6)).join(", ")} typingâ€¦`
+                : "\u00A0"}
+            </div>
+
+            <form className="composer" onSubmit={onSend}>
+              <input
+                value={text}
+                onChange={(e) => {
+                  setText(e.target.value);
+                  onTyping();
+                }}
+                placeholder="Type a messageâ€¦"
+                autoComplete="off"
+              />
+              <button
+                className="btn btn-primary"
+                type="submit"
+                disabled={sending || !text.trim()}
+              >
+                Send
+              </button>
+            </form>
+          </>
+        )}
+      </main>
+
+      <aside className="sidebar sidebar-right">
+        <div className="panel-section">
+          <h3>
+            Notifications {unread > 0 && <span className="badge">{unread}</span>}
+          </h3>
+          {unread > 0 && (
+            <button
+              className="btn btn-ghost"
+              style={{ marginBottom: 10, width: "100%" }}
+              onClick={() => void markAllRead()}
+            >
+              Mark all read
+            </button>
+          )}
+          {notifications.length === 0 && (
+            <p style={{ color: "var(--text-muted)", fontSize: "0.85rem" }}>
+              No notifications
+            </p>
+          )}
+          {notifications.slice(0, 15).map((n) => (
+            <div key={n.id} className="notif-item">
+              <div>
+                {n.content.slice(0, 80)}
+                {n.content.length > 80 ? "â€¦" : ""}
+              </div>
+              <div className="time">
+                {new Date(n.createdAt).toLocaleString()}
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <div className="panel-section">
+          <h3>Online ({onlineUsers.size})</h3>
+          {[...onlineUsers].map((id) => (
+            <div key={id} className="member-row">
+              <span className="status-dot online" />
+              {id === user.id ? "you" : `${id.slice(0, 12)}â€¦`}
+            </div>
+          ))}
+          {onlineUsers.size === 0 && (
+            <p style={{ color: "var(--text-muted)", fontSize: "0.85rem" }}>
+              Nobody online yet
+            </p>
+          )}
+        </div>
+      </aside>
+
+      {showPrivateModal && (
+        <div
+          className="modal-backdrop"
+          onClick={() => setShowPrivateModal(false)}
+        >
+          <form
+            className="modal"
+            onClick={(e) => e.stopPropagation()}
+            onSubmit={handleCreatePrivate}
+          >
+            <h3>New private chat</h3>
+            <div className="form-group">
+              <label>Other user ID (UUID)</label>
+              <input
+                value={otherUserId}
+                onChange={(e) => setOtherUserId(e.target.value)}
+                required
+                placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+              />
+            </div>
+            <p style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>
+              Tip: open another browser, register a second user, click their
+              user id under the name to copy.
+            </p>
+            <div className="modal-actions">
+              <button
+                type="button"
+                className="btn btn-ghost"
+                onClick={() => setShowPrivateModal(false)}
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                className="btn btn-primary"
+                style={{ width: "auto" }}
+              >
+                Create
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {showGroupModal && (
+        <div
+          className="modal-backdrop"
+          onClick={() => setShowGroupModal(false)}
+        >
+          <form
+            className="modal"
+            onClick={(e) => e.stopPropagation()}
+            onSubmit={handleCreateGroup}
+          >
+            <h3>New group</h3>
+            <div className="form-group">
+              <label>Group name</label>
+              <input
+                value={groupName}
+                onChange={(e) => setGroupName(e.target.value)}
+                required
+                maxLength={100}
+              />
+            </div>
+            <div className="modal-actions">
+              <button
+                type="button"
+                className="btn btn-ghost"
+                onClick={() => setShowGroupModal(false)}
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                className="btn btn-primary"
+                style={{ width: "auto" }}
+              >
+                Create
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+================================================
+FILE: apps/web/src/store/auth.tsx
+================================================
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useState,
+  type ReactNode,
+} from "react";
+import { authApi, setAccessToken, getAccessToken } from "../api/client";
+import { connectSocket, disconnectSocket } from "../api/socket";
+import type { User } from "../types";
+
+interface AuthState {
+  user: User | null;
+  loading: boolean;
+  login: (email: string, password: string) => Promise<void>;
+  register: (data: {
+    email: string;
+    password: string;
+    firstName: string;
+    lastName: string;
+  }) => Promise<void>;
+  logout: () => Promise<void>;
+}
+
+const AuthContext = createContext<AuthState | null>(null);
+
+export function AuthProvider({ children }: { children: ReactNode }) {
+  const [user, setUser] = useState<User | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  const bootstrap = useCallback(async () => {
+    if (!getAccessToken()) {
+      setLoading(false);
+      return;
+    }
+    try {
+      const res = await authApi.me();
+      if (res.data) {
+        setUser(res.data);
+        connectSocket();
+      }
+    } catch {
+      try {
+        const refreshed = await authApi.refresh();
+        if (refreshed.data?.accessToken) {
+          setAccessToken(refreshed.data.accessToken);
+          const me = await authApi.me();
+          if (me.data) {
+            setUser(me.data);
+            connectSocket();
+          }
+        }
+      } catch {
+        setAccessToken(null);
+      }
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void bootstrap();
+  }, [bootstrap]);
+
+  const login = useCallback(async (email: string, password: string) => {
+    const res = await authApi.login({ email, password });
+    if (!res.data) throw new Error("Login failed");
+    setAccessToken(res.data.accessToken);
+    setUser(res.data.user);
+    connectSocket();
+  }, []);
+
+  const register = useCallback(
+    async (data: {
+      email: string;
+      password: string;
+      firstName: string;
+      lastName: string;
+    }) => {
+      await authApi.register(data);
+      await login(data.email, data.password);
+    },
+    [login],
+  );
+
+  const logout = useCallback(async () => {
+    try {
+      await authApi.logout();
+    } finally {
+      disconnectSocket();
+      setAccessToken(null);
+      setUser(null);
+    }
+  }, []);
+
+  const value = useMemo(
+    () => ({ user, loading, login, register, logout }),
+    [user, loading, login, register, logout],
+  );
+
+  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
+}
+
+export function useAuth() {
+  const ctx = useContext(AuthContext);
+  if (!ctx) throw new Error("useAuth must be used within AuthProvider");
+  return ctx;
+}
+
+
+================================================
+FILE: apps/web/src/types/index.ts
+================================================
+export interface User {
+  id: string;
+  email: string;
+  firstName: string;
+  lastName: string;
+  createdAt: string;
+}
+
+export interface RoomMember {
+  id: string;
+  userId: string;
+  role: "OWNER" | "ADMIN" | "MEMBER";
+  joinedAt: string;
+}
+
+export interface Room {
+  id: string;
+  name: string | null;
+  type: "PRIVATE" | "GROUP";
+  createdById: string;
+  createdAt: string;
+  updatedAt: string;
+  members: RoomMember[];
+}
+
+export interface Message {
+  id: string;
+  roomId: string;
+  senderId: string;
+  content: string;
+  createdAt: string;
+  status: "SENT" | "DELIVERED" | "SEEN";
+}
+
+export interface NotificationItem {
+  id: string;
+  roomId: string;
+  messageId: string;
+  senderId: string;
+  content: string;
+  createdAt: string;
+  read?: boolean;
+}
+
+export interface ApiResponse<T = unknown> {
+  success: boolean;
+  message?: string;
+  data?: T;
+  error?: string;
+}
+
+
+================================================
 FILE: apps/websocket-gateway/package.json
 ================================================
 {
@@ -4720,22 +7328,24 @@ FILE: apps/websocket-gateway/package.json
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/server.ts",
-      "build": "tsc",
-      "start": "node dist/server.js"
+    "build": "tsc",
+    "start": "node dist/server.js"
   },
   "dependencies": {
-    "@realtime-chat/shared-types": "*",
-    "@realtime-chat/shared-utils": "*",
     "@realtime-chat/shared-events": "*",
     "@realtime-chat/shared-kafka": "*",
+    "@realtime-chat/shared-types": "*",
+    "@realtime-chat/shared-utils": "*",
+    "@socket.io/redis-adapter": "^8.3.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "express": "^4.21.0",
     "helmet": "^7.1.0",
+    "ioredis": "^6.0.0",
     "jsonwebtoken": "^9.0.3",
+    "pino": "^10.3.1",
     "socket.io": "^4.8.1",
-    "zod": "^3.23.8",
-    "pino": "^10.3.1"
+    "zod": "^3.23.8"
   },
   "devDependencies": {
     "@types/cors": "^2.8.17",
@@ -4746,6 +7356,7 @@ FILE: apps/websocket-gateway/package.json
     "typescript": "^5.6.0"
   }
 }
+
 
 
 ================================================
@@ -4770,6 +7381,7 @@ PORT=4003
 KAFKA_BROKER=localhost:9095
 JWT_ACCESS_SECRET=change_me_to_a_long_random_string_at_least_32_chars
 REDIS_URL=redis://:realtimepass@localhost:6380
+INTERNAL_SERVICE_KEY=change_me_to_a_long_random_string_at_least_32_chars
 
 
 ================================================
@@ -4779,12 +7391,15 @@ import express from "express";
 import helmet from "helmet";
 import cors from "cors";
 import type { Request, Response } from "express";
+import { Redis } from "ioredis";
 
 import { config } from "./config/index.js";
 import { connectionManager } from "./infrastructure/connection-manager.js";
+import { correlationId } from "./middlewares/correlation.middleware.js";
 
 const app = express();
 
+app.use(correlationId);
 app.use(helmet());
 app.use(
   cors({
@@ -4803,6 +7418,35 @@ app.get("/health", (_req: Request, res: Response) => {
   });
 });
 
+app.get("/ready", async (_req: Request, res: Response) => {
+  try {
+    const redis = new Redis(config.REDIS_URL, {
+      maxRetriesPerRequest: 1,
+      connectTimeout: 2000,
+      lazyConnect: true,
+    });
+
+    await redis.connect();
+    const pong = await redis.ping();
+    await redis.quit();
+
+    if (pong !== "PONG") {
+      throw new Error("Redis ping failed");
+    }
+
+    res.status(200).json({
+      ready: true,
+      checks: { redis: "ok" },
+    });
+  } catch (err) {
+    res.status(503).json({
+      ready: false,
+      checks: { redis: "fail" },
+      error: err instanceof Error ? err.message : "unknown",
+    });
+  }
+});
+
 export default app;
 
 
@@ -4812,6 +7456,9 @@ FILE: apps/websocket-gateway/src/server.ts
 import "dotenv/config";
 import { createServer, type Server as HttpServer } from "node:http";
 import { Server } from "socket.io";
+
+import { createAdapter } from "@socket.io/redis-adapter";
+import { Redis } from "ioredis";
 
 import app from "./app.js";
 import { config } from "./config/index.js";
@@ -4884,12 +7531,14 @@ const shutdown = async (signal: string): Promise<void> => {
 const startServer = async (): Promise<void> => {
   try {
     httpServer = createServer(app);
-
+    const pubClient = new Redis(config.REDIS_URL);
+    const subClient = pubClient.duplicate();
     const socketServer = new Server(httpServer, {
       cors: {
         origin: config.CLIENT_ORIGINS,
         credentials: true,
       },
+      adapter:createAdapter(pubClient,subClient)
     });
 
     io = socketServer;
@@ -5133,7 +7782,8 @@ const envSchema = z.object({
       .string()
       .min(1)
       .transform((value) => value.split(",").map((o) => o.trim())),
-  });
+    INTERNAL_SERVICE_KEY:z.string()
+});
 
 
 const parsed = envSchema.safeParse(process.env);
@@ -5265,7 +7915,7 @@ export async function markMessagesDelivered(roomId: string, messageIds: string[]
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        // TODO ADD INTERNAL CALL HEADER
+        "x-internal-service-key":config.INTERNAL_SERVICE_KEY
       },
       body: JSON.stringify({ messageIds })
     })
@@ -5598,6 +8248,21 @@ export async function publishUserOffline(userId: string): Promise<void> {
 
 
 ================================================
+FILE: apps/websocket-gateway/src/middlewares/correlation.middleware.ts
+================================================
+import { randomUUID } from "node:crypto";
+import type { RequestHandler } from "express";
+
+export const correlationId: RequestHandler = (req, res, next) => {
+  const id =
+    (req.headers["x-correlation-id"] as string | undefined) || randomUUID();
+  req.headers["x-correlation-id"] = id;
+  res.setHeader("x-correlation-id", id);
+  next();
+};
+
+
+================================================
 FILE: apps/websocket-gateway/src/middlewares/socket-auth.ts
 ================================================
 import { Socket } from "socket.io";
@@ -5727,7 +8392,7 @@ import { z } from "zod";
 export const NotificationCreatedSchema = z.object({
   eventId: z.string().uuid(),
   eventType: z.literal("notification.created"),
-  occuredAt: z.string().datetime(),
+  occurredAt: z.string().datetime(),
   data: z.object({
     notificationId: z.string().uuid(),
     userId: z.string().uuid(),
@@ -5735,7 +8400,7 @@ export const NotificationCreatedSchema = z.object({
     senderId: z.string().uuid(),
     content: z.string(),
     createdAt: z.string().datetime(),
-    messageId:z.string().uuid()
+    messageId: z.string().uuid(),
   }),
 });
 
@@ -5991,7 +8656,8 @@ export const TOPICS = {
   PRESENCE_USER_ONLINE: "presence.user.online",
   PRESENCE_USER_OFFLINE: "presence.user.offline",
   CHAT_MESSAGE_STATUS: "chat.message.status",
-  NOTIFICATION_CREATED:"notification.created"
+  NOTIFICATION_CREATED: "notification.created",
+  CHAT_OUTBOX_DLQ: "chat.outbox.dlq",
 }
 
 export type TopicName=(typeof TOPICS)[keyof typeof TOPICS]

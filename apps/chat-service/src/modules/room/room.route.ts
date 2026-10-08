@@ -7,15 +7,23 @@ import {
   createRoom,
   getMyRooms,
   getRoomById,
+  getRoomMembers,
 } from "./room.controller.js";
+import { internalAuth } from "../../middlewares/internal-auth.middleware.js";
 
 const router = express.Router();
 
+router.use(authenticate);
+// ---------- Internal (no JWT, service key only) ----------
+router.get("/internal/:roomId/members", internalAuth, getRoomMembers); 
+
+// ---------- Client-facing (JWT) ----------
 router.use(authenticate);
 
 router.post("/", validate(createRoomSchema), createRoom);
 router.get("/", getMyRooms);
 router.get("/:roomId", getRoomById);
 router.post("/:roomId/members", validate(addMemberSchema), addMember);
+router.get("/:roomId/members", getRoomMembers);          
 
 export default router;

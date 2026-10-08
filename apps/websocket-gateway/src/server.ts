@@ -2,6 +2,9 @@ import "dotenv/config";
 import { createServer, type Server as HttpServer } from "node:http";
 import { Server } from "socket.io";
 
+import { createAdapter } from "@socket.io/redis-adapter";
+import { Redis } from "ioredis";
+
 import app from "./app.js";
 import { config } from "./config/index.js";
 import {
@@ -73,12 +76,14 @@ const shutdown = async (signal: string): Promise<void> => {
 const startServer = async (): Promise<void> => {
   try {
     httpServer = createServer(app);
-
+    const pubClient = new Redis(config.REDIS_URL);
+    const subClient = pubClient.duplicate();
     const socketServer = new Server(httpServer, {
       cors: {
         origin: config.CLIENT_ORIGINS,
         credentials: true,
       },
+      adapter:createAdapter(pubClient,subClient)
     });
 
     io = socketServer;

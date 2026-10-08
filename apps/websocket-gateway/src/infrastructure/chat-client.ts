@@ -22,7 +22,7 @@ export async function markMessagesDelivered(roomId: string, messageIds: string[]
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        // TODO ADD INTERNAL CALL HEADER
+        "x-internal-service-key":config.INTERNAL_SERVICE_KEY
       },
       body: JSON.stringify({ messageIds })
     })
